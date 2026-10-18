@@ -1,0 +1,8 @@
+# Tracked paths that stay in this repository and never reach the public mirror.
+# tools/export-public.js reads this file from the source commit and applies it
+# by default, in addition to any --exclude flag. One prefix per line; a line that
+# starts with # is a comment. A prefix is taken as written: no ./ in front, and a
+# directory ends with /.
+docs/runbooks/
+docs/superpowers/
+test/noms-prives.test.js

@@ -1,0 +1,71 @@
+# La CI du VALXOS Messenger — le MÊME geste que la maison, exactement.
+#
+# `node --test test/*.test.js` — jamais `npm test` : `node --test` nu PARCOURT
+# l'arbre (une copie d'audit sous tmp/ serait comptée deux fois — c'est arrivé),
+# tandis que le glob nomme exactement la suite.
+# `engines.node` de package.json dit une borne (>=20), pas une version : un
+# patch-release peut changer un comportement (T7-ci-linux : `fs.cpSync` avec
+# `{ force:false, errorOnExist:true }` a changé de sémantique entre Node
+# 26.9.0 et 26.10.0). Une seule version testée mentirait sur ce que `>=20`
+# promet vraiment : la matrice éprouve 20/22/24/26 — chaque LTS et la plus
+# récente — plutôt que de se fier à ce que `setup-node` résout ce jour-là.
+# `fail-fast: false` : un échec sur une version ne cache pas les autres.
+# better-sqlite3 est un module natif : la version de Node fait partie du
+# contrat, et `npm ci` reconstruit le module pour celle que chaque jambe choisit.
+#
+# `VALXOS_GARDES_MODE: ci` (Run 6, ruling 10) : sur le runner, le compte, la
+# machine et le domicile sont ceux de GitHub, pas de la maison — les gardes
+# d'identité ne les cherchent pas. Le mode ne s'allume que si GITHUB_ACTIONS
+# vaut aussi « true » (test/aide-identites.js, modeCI).
+# `timeout-minutes: 8` : la jambe la plus lente est Node 20, environ cinq minutes
+# sur les runners de GitHub — elle a été annulée à 5m03 sous l'ancienne borne de
+# cinq. Huit, c'est une marge, pas une licence : une suite qui s'approche de huit
+# minutes est un signal à lire. (Aucun compte de tests ici : la suite imprime le
+# sien, et un nombre écrit en prose vieillit à chaque test ajouté.)
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24, 26]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: node --version
+      - run: node --test test/*.test.js
+        env:
+          VALXOS_GARDES_MODE: ci
+
+  # LA MARCHE DE L'INCONNU (N3, seconde passe adverse du Run 6, 28/09). Sous
+  # npm 12, `npm i -g valxos-messenger` laissait un paquet qui plante à chaque
+  # commande (le script d'installation de better-sqlite3 est bloqué par
+  # défaut), et le dry-run disait « core install complete ». Ce job joue la
+  # marche entière d'un inconnu — pack, installation globale npm 12 sur un
+  # préfixe et un HOME jetables, install --dry-run, install, doctor, send,
+  # inbox — sur un bureau jetable. Le même script tourne en local.
+  stranger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 26]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: .github/scripts/stranger.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+

@@ -1,0 +1,99 @@
+{
+  "name": "valxos-messenger",
+  "version": "1.0.0",
+  "description": "VALXOS Messenger (formerly cc2cc-v2 / CEREAL): local durable inter-instance messaging for coding sessions",
+  "type": "module",
+  "main": "src/mcp-server/server.js",
+  "bin": {
+    "valxos-messenger": "src/bin/valxos-messenger.js",
+    "valxos-send": "src/bin/valxos-send.js",
+    "valxos-peers": "src/bin/valxos-peers.js",
+    "valxos-inbox": "src/bin/valxos-inbox.js",
+    "valxos-unregister": "src/bin/valxos-unregister.js",
+    "valxos-chaise": "src/bin/valxos-chaise.js",
+    "valxos-monitor": "src/monitor/valxos_monitor.py",
+    "valxos-migrate-v1": "scripts/migrate-v1.js",
+    "valxos-migrate-home": "scripts/migrate-home.js",
+    "valxos-doctor": "src/bin/valxos-doctor.js",
+    "valxos-web": "src/bin/valxos-web.js",
+    "cc2cc-send": "src/bin/valxos-send.js",
+    "cc2cc-peers": "src/bin/valxos-peers.js",
+    "cc2cc-inbox": "src/bin/valxos-inbox.js",
+    "cc2cc-unregister": "src/bin/valxos-unregister.js",
+    "cc2cc-chaise": "src/bin/valxos-chaise.js",
+    "cc2cc-monitor": "src/monitor/valxos_monitor.py",
+    "cc2cc-migrate-v1": "scripts/migrate-v1.js",
+    "cc2cc-migrate-home": "scripts/migrate-home.js",
+    "cc2cc-doctor": "src/bin/valxos-doctor.js",
+    "cc2cc-web": "src/bin/valxos-web.js",
+    "facteur": "src/bin/facteur.js"
+  },
+  "files": [
+    "src/",
+    "scripts/",
+    "docs/",
+    "!docs/QUARANTAINE.md",
+    "!docs/superpowers/",
+    "!docs/runbooks/",
+    ".claude-plugin/",
+    "skills/",
+    "hooks/",
+    "monitors/",
+    "mcp.json",
+    "README.md",
+    "README.fr.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "!**/__pycache__/",
+    "!**/*.pyc"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "doctor": "node src/bin/valxos-doctor.js",
+    "install:plugin": "node scripts/install.js",
+    "migrate:v1:dry-run": "node scripts/migrate-v1.js --dry-run",
+    "migrate:v1": "node scripts/migrate-v1.js --apply",
+    "migrate:home:dry-run": "node scripts/migrate-home.js --dry-run",
+    "migrate:home": "node scripts/migrate-home.js --apply",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "claude-code",
+    "valxos-messenger",
+    "valxos",
+    "messenger",
+    "messaging",
+    "mcp",
+    "model-context-protocol",
+    "inter-agent",
+    "sqlite",
+    "unix-socket",
+    "cli",
+    "codex",
+    "hermes"
+  ],
+  "author": "VALXOS contributors",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/valx-vex/valxos-messenger.git"
+  },
+  "homepage": "https://github.com/valx-vex/valxos-messenger#readme",
+  "bugs": {
+    "url": "https://github.com/valx-vex/valxos-messenger/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.11.1",
+    "zod": "^4.2.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  }
+}

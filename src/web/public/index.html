@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 VALXOS contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Licence complète : voir LICENSE à la racine du dépôt. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E141C">
+<title>VALXOS Messenger — web door</title>
+<!-- LE CACHET, JUSQUE DANS L'ONGLET. Sans icône, chaque ouverture laissait une
+     404 `/favicon.ico` dans la console — pas un défaut de code, un défaut de
+     soin, sur une page qui va être filmée puis lue par des inconnus.
+     Embarquée en `data:` URI, et c'est le point : la liste des routes est
+     FERMÉE (contrat, garde n°1), une icône servie par un chemin serait une
+     entrée de plus au tableau ET au contrat. La CSP autorise déjà
+     `img-src 'self' data:`. Le dessin est celui du cachet du pli (même cadre
+     46×46, mêmes anneaux concentriques, même barre d'oblitération).
+     ⚠️ ET LA MÊME ENCRE : #C7402D, la valeur de `--cachet` dans style.css. Elle
+     est écrite ici en toutes lettres parce qu'un `data:` URI ne peut pas lire
+     une variable CSS — donc le seul garde-fou possible est de la NOMMER, pour
+     qu'une dérive se voie. Elle avait dérivé : l'icône peignait #C4553F, un
+     rouge voisin que la palette ne déclare nulle part, pendant que ce
+     commentaire jurait que c'était le dessin du cachet. La palette est celle
+     de la maquette validée, point — on n'y ajoute pas une couleur. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2046%2046'%3E%3Ccircle%20cx='23'%20cy='23'%20r='21'%20fill='none'%20stroke='%23C7402D'%20stroke-width='3'/%3E%3Ccircle%20cx='23'%20cy='23'%20r='15'%20fill='none'%20stroke='%23C7402D'%20stroke-width='2'/%3E%3Cpath%20d='M7%2033%20L39%2013'%20stroke='%23C7402D'%20stroke-width='3.5'%20stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/polices.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="entete">
+  <div class="marque">
+    <h1 class="marque__nom">VALXOS <span>·</span> Messenger</h1>
+    <!-- DEUX PRISES, PAS UNE : l'opérateur vient de l'API et la machine de
+         l'hôte qui sert la page. Avec une seule prise, le chargement écraserait
+         la ligne entière. Le document ne porte aucun défaut d'identité. -->
+    <span class="marque__sous"><span id="marque-sous"></span> · <span id="marque-machine"></span></span>
+  </div>
+  <ul class="boites" id="boites-haut"></ul>
+  <ul class="legende" id="legende" aria-label="A letter's journey"></ul>
+  <!-- Le bandeau se tait quand tout va bien : un canal de panne toujours
+       affiché finit par ne plus se voir du tout, et c'est le jour de la vraie
+       panne qu'on le paie. -->
+  <p class="bandeau" id="bandeau" role="status" hidden></p>
+</header>
+
+<nav class="colonne" aria-label="Mailboxes">
+  <p class="colonne__titre">Live mailboxes</p>
+  <ul class="boites" id="boites-cote"></ul>
+</nav>
+
+<!-- `aria-live` pour qu'une lettre qui tombe toute seule soit ANNONCÉE et pas
+     seulement dessinée : c'est pour ce moment-là que la page existe. Les
+     repeintures complètes passent sous `aria-busy`, sinon un rechargement
+     relirait tout le fil à voix haute. -->
+<main class="fil" id="fil" aria-live="polite" aria-busy="true" aria-label="Letters"></main>
+
+<form class="guichet" id="guichet" autocomplete="off">
+  <div class="guichet__a">to: <strong id="destinataire">…</strong></div>
+  <!-- LE GUICHET FERMÉ S'EXPLIQUE. Sur un bureau neuf il n'y a aucune
+       destination possible, et « Poster » ne faisait rien sous le doigt, sans
+       un mot. `role="status"` pour que le vide soit ANNONCÉ et pas seulement
+       dessiné : c'est une information, pas une décoration. -->
+  <p class="guichet__ferme" id="guichet-ferme" role="status" hidden></p>
+  <div class="guichet__ligne">
+    <textarea class="guichet__champ" id="champ" rows="1" placeholder="Write your letter." aria-label="Your letter"></textarea>
+    <button class="poster" id="poster" type="submit">Post</button>
+  </div>
+</form>
+
+<!-- `type="module"` : les fonctions qui traduisent les réponses de l'API sont
+     `export`ées pour que `test/web-front.test.js` les éprouve avec de VRAIES
+     réponses de /api/pairs et /api/fil. Un module est déjà différé — le
+     `defer` d'avant n'a plus lieu d'être. -->
+<script type="module" src="/app.js"></script>
+</body>
+</html>

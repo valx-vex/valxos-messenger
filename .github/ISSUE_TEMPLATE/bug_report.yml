@@ -1,0 +1,50 @@
+name: Bug report
+description: Something behaves differently from what the documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: several rough edges are known and documented on purpose.
+        Please check [Known limitations](../blob/main/README.md#known-limitations)
+        and [SECURITY.md](../blob/main/SECURITY.md) first — reports of those are
+        closed as known.
+
+        **Never report a suspected vulnerability here.** Use the Security tab.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what happened, what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The exact commands. Paste output rather than describing it.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit tested
+      description: "Output of `git rev-parse --short HEAD`."
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: "OS, `node -v`, and how it is installed (checkout, plugin, CLI links)."
+    validations:
+      required: true
+  - type: textarea
+    id: gate
+    attributes:
+      label: Test suite result
+      description: "Output of `node --test test/*.test.js` on your machine."
+      render: shell
+    validations:
+      required: false

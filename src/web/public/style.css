@@ -1,0 +1,696 @@
+/* SPDX-FileCopyrightText: 2026 VALXOS contributors */
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Licence complète : voir LICENSE à la racine du dépôt. */
+/* ═══ LE BUREAU DE POSTE ═══════════════════════════════════════════════════
+   Direction : une lettre n'est pas une bulle de chat. C'est un pli, posé sur
+   un bureau sombre, et son CACHET se complète à mesure qu'elle voyage.
+   Quatre états de la loi A8/A9, un seul dessin :
+     en attente → anneau pointillé, ocre      (le pli existe, personne ne l'a pris)
+     au guichet → anneau plein, bleu          (la boîte a accepté les octets)
+     reçue      → double anneau, bleu         (un porteur a préparé le contexte)
+     accusée    → double anneau + barre, rouge (le destinataire l'a DIT lui-même)
+
+   Cette feuille est la maquette validée, sortie du <style> inline et rien
+   d'autre. Le
+   seul BLOC AJOUTÉ est le dernier — les états d'échec, que la maquette n'avait
+   pas parce qu'elle n'avait pas de serveur derrière. Palette, polices,
+   géométrie du cachet et disposition sont intouchées : le dessin est arrêté.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bureau:      #0E141C;   /* le bois sombre du bureau */
+  --bureau-haut: #161F2B;   /* une surface posée dessus */
+  --trait:       #26313F;   /* les filets */
+  --pli:         #F3EEE4;   /* le papier */
+  --pli-ombre:   #D9D1C2;   /* le pli du papier */
+  --encre:       #1A222D;   /* l'encre sur le papier */
+  --encre-pale:  #6C7583;
+
+  --vivant:      #4E9E6A;   /* une boîte qui répond */
+  --attente:     #C98A2B;   /* l'ocre de l'attente */
+  --guichet:     #6E92BF;   /* le bleu de l'administration */
+  --cachet:      #C7402D;   /* le rouge de l'accusé de réception */
+
+  --texte:       #E8E3D9;
+  --texte-pale:  #8A94A3;
+
+  --grille:      clamp(16px, 4.5vw, 28px);
+  --rayon:       3px;       /* le papier n'a presque pas de coins ronds */
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bureau);
+  color: var(--texte);
+  font-family: "Literata", Georgia, "Times New Roman", serif;
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* le bureau a un grain très léger — deux dégradés, aucune image */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 70% at 50% -10%, rgba(110,146,191,.10), transparent 60%),
+    radial-gradient(80% 50% at 100% 100%, rgba(199,64,45,.06), transparent 70%);
+  z-index: 0;
+}
+
+.enveloppe { position: relative; z-index: 1; display: contents; }
+
+/* ── L'EN-TÊTE ───────────────────────────────────────────────────────────── */
+
+.entete {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding: max(10px, env(safe-area-inset-top)) var(--grille) 0;
+  background: color-mix(in srgb, var(--bureau) 92%, transparent);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--trait);
+}
+
+.marque {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+
+.marque__nom {
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  font-variation-settings: "wdth" 118, "wght" 760;
+  font-size: clamp(15px, 4.2vw, 19px);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  margin: 0;
+  color: var(--texte);
+}
+
+.marque__nom span { color: var(--cachet); }
+
+.marque__sous {
+  font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--texte-pale);
+  letter-spacing: .04em;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ── LA RANGÉE DES BOÎTES ────────────────────────────────────────────────── */
+
+.boites {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 0 0 12px;
+  margin: 0;
+  list-style: none;
+  scroll-snap-type: x proximity;
+}
+.boites::-webkit-scrollbar { display: none; }
+
+.boite {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px 7px 10px;
+  border: 1px solid var(--trait);
+  border-radius: 999px;
+  background: var(--bureau-haut);
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--texte);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .16s ease, background .16s ease;
+}
+
+.boite:hover { border-color: #3A4757; }
+
+.boite:focus-visible {
+  outline: 2px solid var(--guichet);
+  outline-offset: 2px;
+}
+
+.boite[aria-pressed="true"] {
+  border-color: var(--cachet);
+  background: color-mix(in srgb, var(--cachet) 14%, var(--bureau-haut));
+}
+
+.boite__voyant {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--vivant);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vivant) 22%, transparent);
+  flex: 0 0 auto;
+}
+
+.boite--morte { opacity: .42; }
+.boite--morte .boite__voyant {
+  background: #5A6371;
+  box-shadow: none;
+}
+
+.boite__designee {
+  font-family: "Archivo", sans-serif;
+  font-variation-settings: "wdth" 112, "wght" 700;
+  font-size: 8.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--cachet);
+  border: 1px solid color-mix(in srgb, var(--cachet) 50%, transparent);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+
+/* ── LA LÉGENDE : les quatre états, lisibles sans qu'on les explique ─────── */
+
+.legende {
+  display: flex;
+  gap: 13px;
+  align-items: center;
+  overflow-x: auto;
+  scrollbar-width: none;
+  list-style: none;
+  margin: 0;
+  padding: 0 0 9px;
+  border-top: 1px solid var(--trait);
+  padding-top: 9px;
+}
+.legende::-webkit-scrollbar { display: none; }
+
+.legende__item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.legende__item svg { width: 19px; height: 19px; display: block; }
+
+.legende__mot {
+  font-family: "Archivo", sans-serif;
+  font-variation-settings: "wdth" 110, "wght" 640;
+  font-size: 8.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--texte-pale);
+}
+
+.legende__fleche { color: #3A4757; font-size: 10px; flex: 0 0 auto; }
+
+/* ── LE FIL ──────────────────────────────────────────────────────────────── */
+
+.fil {
+  flex: 1;
+  padding: 18px var(--grille) 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.fil__jour {
+  align-self: center;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--texte-pale);
+  padding: 2px 0;
+}
+
+/* ── LE PLI ──────────────────────────────────────────────────────────────── */
+
+.pli {
+  position: relative;
+  background: var(--pli);
+  color: var(--encre);
+  border-radius: var(--rayon);
+  padding: 13px 15px 12px;
+  max-width: 40rem;
+  width: 100%;
+  align-self: flex-start;
+  box-shadow: 0 1px 0 var(--pli-ombre), 0 10px 24px -14px rgba(0,0,0,.8);
+  animation: depot .42s cubic-bezier(.2,.8,.3,1) both;
+}
+
+.pli--mien {
+  align-self: flex-end;
+  background: #E7E9EC;
+  box-shadow: 0 1px 0 #CDD2D8, 0 10px 24px -14px rgba(0,0,0,.8);
+}
+
+@keyframes depot {
+  from { opacity: 0; transform: translateY(14px) rotate(-.4deg); }
+  to   { opacity: 1; transform: none; }
+}
+
+.pli__tete {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.pli__de {
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  color: #4B5563;
+  line-height: 1.3;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pli__de b {
+  display: block;
+  font-weight: 500;
+  color: var(--encre);
+  font-size: 12.5px;
+}
+
+.pli__objet {
+  font-family: "Archivo", sans-serif;
+  font-variation-settings: "wdth" 110, "wght" 680;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #3D4753;
+  margin: 0 0 5px;
+}
+
+.pli__corps {
+  font-size: 15px;
+  line-height: 1.6;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pli__corps + .pli__corps { margin-top: .7em; }
+
+/* ── LE CACHET : le dessin qui porte toute la loi ────────────────────────── */
+
+.cachet {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 54px;
+  text-align: center;
+  transform: rotate(-4deg);
+  transform-origin: center;
+}
+
+.cachet svg { display: block; width: 46px; height: 46px; margin: 0 auto; }
+
+.cachet__mot {
+  display: block;
+  font-family: "Archivo", sans-serif;
+  font-variation-settings: "wdth" 112, "wght" 700;
+  font-size: 8px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  margin-top: 3px;
+  line-height: 1.1;
+}
+
+.cachet__heure {
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 9.5px;
+  font-weight: 500;
+}
+
+/* les quatre encres */
+.cachet--attente { color: var(--attente); }
+.cachet--guichet { color: var(--guichet); }
+.cachet--recue   { color: var(--guichet); }
+.cachet--accusee { color: var(--cachet); }
+
+.cachet--attente .cachet__mot { color: #97701F; }
+.cachet--guichet .cachet__mot,
+.cachet--recue   .cachet__mot { color: #45688F; }
+.cachet--accusee .cachet__mot { color: var(--cachet); }
+
+/* le « thunk » du tampon quand l'état avance */
+.cachet--frappe { animation: frappe .34s cubic-bezier(.3,1.5,.5,1) both; }
+@keyframes frappe {
+  0%   { transform: rotate(-4deg) scale(1.5); opacity: .25; }
+  55%  { transform: rotate(-4deg) scale(.94); opacity: 1; }
+  100% { transform: rotate(-4deg) scale(1); }
+}
+
+/* ── L'AVIS 2-BIS : quand la lettre va attendre, on le DIT ───────────────── */
+
+.avis {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  max-width: 40rem;
+  width: 100%;
+  align-self: flex-start;
+  padding: 9px 12px;
+  border-left: 3px solid var(--attente);
+  background: color-mix(in srgb, var(--attente) 9%, transparent);
+  border-radius: 0 var(--rayon) var(--rayon) 0;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #D8C295;
+}
+
+.avis b { color: var(--attente); font-weight: 500; }
+
+/* ── LE COMPOSEUR ────────────────────────────────────────────────────────── */
+
+.guichet {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  padding: 10px var(--grille) max(10px, env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bureau) 94%, transparent);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--trait);
+}
+
+.guichet__a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--texte-pale);
+  padding-bottom: 8px;
+}
+
+.guichet__a strong {
+  color: var(--texte);
+  font-weight: 500;
+  border-bottom: 1px dashed #3A4757;
+}
+
+/* LE GUICHET FERMÉ — un bureau neuf n'a aucune destination, et « Poster » ne
+   faisait rien sous le doigt. Même registre que le fil vide : ce n'est pas une
+   panne, c'est un état qui s'explique. L'ocre de l'attente, jamais le rouge
+   d'une avarie — personne n'a rien fait de mal. */
+.guichet__ferme {
+  margin: 0 0 8px;
+  padding: 6px 9px;
+  border-left: 3px solid var(--attente);
+  background: color-mix(in srgb, var(--attente) 8%, transparent);
+  border-radius: 0 2px 2px 0;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #D8C295;
+}
+
+.guichet__ferme[hidden] { display: none; }
+
+.guichet__ligne {
+  display: flex;
+  gap: 9px;
+  align-items: flex-end;
+}
+
+.guichet__champ {
+  flex: 1;
+  min-width: 0;
+  background: var(--bureau-haut);
+  border: 1px solid var(--trait);
+  border-radius: var(--rayon);
+  color: var(--texte);
+  font-family: "Literata", Georgia, serif;
+  font-size: 15px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  resize: none;
+  max-height: 8.5em;
+}
+
+.guichet__champ::placeholder { color: #5A6371; }
+
+.guichet__champ:focus-visible {
+  outline: none;
+  border-color: var(--guichet);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--guichet) 18%, transparent);
+}
+
+.poster {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--rayon);
+  background: var(--cachet);
+  color: #FFF4F1;
+  font-family: "Archivo", sans-serif;
+  font-variation-settings: "wdth" 114, "wght" 720;
+  font-size: 12px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  padding: 12px 17px;
+  cursor: pointer;
+  transition: background .15s ease, transform .1s ease;
+}
+
+.poster:hover { background: #D64B36; }
+.poster:active { transform: translateY(1px); }
+.poster:focus-visible { outline: 2px solid var(--pli); outline-offset: 2px; }
+
+/* ── LARGE : la rangée devient une colonne ───────────────────────────────── */
+
+@media (min-width: 900px) {
+  body {
+    display: grid;
+    grid-template-columns: 268px 1fr;
+    grid-template-rows: auto 1fr auto;
+    height: 100dvh;
+  }
+  .entete { grid-column: 1 / -1; padding-bottom: 0; }
+  .entete .boites { display: none; }
+  .colonne {
+    grid-row: 2 / 4;
+    border-right: 1px solid var(--trait);
+    padding: 18px 16px;
+    overflow-y: auto;
+  }
+  .colonne .boites {
+    flex-direction: column;
+    align-items: stretch;
+    overflow: visible;
+    gap: 6px;
+  }
+  .colonne .boite { border-radius: var(--rayon); justify-content: flex-start; }
+  .colonne__titre {
+    font-family: "Archivo", sans-serif;
+    font-variation-settings: "wdth" 112, "wght" 700;
+    font-size: 9.5px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--texte-pale);
+    margin: 0 0 10px;
+  }
+  .colonne__titre + .boites { margin-bottom: 20px; }
+  .fil { grid-column: 2; grid-row: 2; }
+  .guichet { grid-column: 2; grid-row: 3; }
+}
+
+@media (max-width: 899px) {
+  .colonne { display: contents; }
+  .colonne__titre { display: none; }
+  .colonne .boites { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ═══ CE QUE LA MAQUETTE N'AVAIT PAS ════════════════════════════════════════
+   Une maquette n'a pas de réseau, donc pas d'échec. Une porte, si. Ces états
+   entrent dans le dessin existant plutôt que d'en ouvrir un deuxième : l'ocre
+   de l'attente pour ce qui va revenir, le rouge du cachet pour ce qui est
+   cassé, le papier et ses ombres pour tout ce qui vit sur un pli.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* Ce que seul un lecteur d'écran lit — un voyant de couleur ne dit rien à qui
+   ne le voit pas, et « hors service » est une information, pas une nuance. */
+.lecteur-seul {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* LE BANDEAU — le fil décroché, la session expirée. Dans l'en-tête collante :
+   la panne suit le regard, elle ne se perd pas en haut d'un fil qu'on a
+   fait défiler. */
+.bandeau {
+  margin: 0 0 9px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--attente);
+  background: color-mix(in srgb, var(--attente) 9%, transparent);
+  border-radius: 0 2px 2px 0;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #D8C295;
+}
+
+.bandeau[hidden] { display: none; }
+
+.bandeau--expiree {
+  border-left-color: var(--cachet);
+  background: color-mix(in srgb, var(--cachet) 10%, transparent);
+  color: #E9B6AB;
+}
+
+/* LA CLEF ÉCARTÉE — la lettre est partie, mais pas sous l'identifiant que
+   cette page tenait. Ce n'est pas la loi qui a fonctionné (ça, c'est le
+   rejeu, et il reste sur le pli) : c'est un accident, il prend l'encre du
+   cachet, celle des choses qu'on ne laisse pas passer. */
+.bandeau--ecart {
+  border-left-color: var(--cachet);
+  background: color-mix(in srgb, var(--cachet) 10%, transparent);
+  color: #E9B6AB;
+}
+
+/* LE FIL VIDE — un bureau neuf n'est pas un bureau en panne. */
+.fil__vide {
+  align-self: center;
+  margin: auto 0;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--texte-pale);
+  text-align: center;
+}
+
+/* LE PLI QUI N'EST PAS PARTI — il reste À L'ÉCRAN, cerclé de rouge. Une
+   lettre qu'on efface parce que le réseau a toussé est une lettre perdue, et
+   rien ne se perd ici : le texte est encore là, le msg_id aussi, la reprise
+   rejoue exactement la même. */
+.pli--nonpartie {
+  box-shadow:
+    0 0 0 1.5px color-mix(in srgb, var(--cachet) 55%, transparent),
+    0 1px 0 var(--pli-ombre),
+    0 10px 24px -14px rgba(0,0,0,.8);
+}
+
+.pli__pied {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--pli-ombre);
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--encre-pale);
+}
+
+.pli--mien .pli__pied { border-top-color: #CDD2D8; }
+
+.pli__avarie { color: #9E3324; }
+
+/* Le refus motivé de l'accusé : c'est la réponse du produit, on la montre
+   telle qu'elle arrive plutôt que de la traduire en « une erreur est
+   survenue ». */
+.pli__refus { flex: 1 1 100%; color: #9E3324; }
+
+/* LE REJEU — « cette lettre était déjà au bureau ». C'est l'idempotence qui a
+   fait son travail : ça se dit, mais dans l'encre pâle du pli, pas dans le
+   rouge des refus. Confondre les deux, c'est apprendre à l'opérateur à ignorer
+   le rouge. */
+.pli__note { flex: 1 1 100%; color: var(--encre-pale); }
+
+/* Le registre du bouton secondaire, transposé sur le papier : même forme que
+   les boutons discrets du bureau, encres du pli. « Réessayer » et « Accuser
+   réception » ne sont pas des gestes primaires — « Poster » l'est, et il
+   reste seul en rouge. */
+.bouton-discret {
+  background: none;
+  border: 1px solid var(--pli-ombre);
+  border-radius: 2px;
+  color: #4B5563;
+  font: inherit;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.bouton-discret:hover { color: var(--encre); border-color: #B9AF9C; }
+.bouton-discret:focus-visible { outline: 2px solid var(--guichet); outline-offset: 2px; }
+.bouton-discret:disabled { opacity: .5; cursor: progress; }
+
+/* UN ÉTAT QUE LA PAGE NE CONNAÎT PAS. L'API est seule juge de l'état d'une
+   lettre — si elle en rend un cinquième mot un jour, la page l'AFFICHE sans
+   anneau plutôt que de le ranger de force dans l'un des quatre dessins. Un
+   cachet menteur serait pire qu'un cachet nu. */
+.cachet--inconnu { color: var(--encre-pale); }
+.cachet--inconnu .cachet__mot { color: var(--encre-pale); }
+
+/* Le guichet fermé : session expirée, on ne fait pas semblant d'accepter une
+   lettre qui ne partirait pas. */
+.poster:disabled { opacity: .45; cursor: not-allowed; }
+.poster:disabled:hover { background: var(--cachet); }
+.guichet__champ:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ═══ CE QUE LE FRONT JETAIT ════════════════════════════════════════════════
+   Trois choses que l'API rendait DÉJÀ et que la page ne montrait pas. Elles
+   entrent dans le dessin existant — l'ocre de l'attente pour ce qui traîne,
+   le registre discret du fil pour ce qui manque — plutôt que d'ouvrir un
+   quatrième vocabulaire.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* LE PLAFOND DU FIL — en tête, là où les lettres disparues manqueraient. Une
+   borne muette se lirait « tout est là » ; celle-ci se lit. */
+.fil__plafond {
+  align-self: center;
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  letter-spacing: .06em;
+  color: var(--attente);
+  opacity: .85;
+  padding: 2px 0;
+  text-align: center;
+}
+
+/* L'EN-SOUFFRANCE D'UNE LETTRE (H2) — sur la ligne d'expéditeur, à l'ocre de
+   l'attente. ORTHOGONALE au cachet : une lettre « reçue » peut être en
+   souffrance, et les deux marques doivent pouvoir se lire ensemble. */
+.pli__souffrance {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  letter-spacing: .03em;
+  color: #97701F;
+}
+
+/* L'EN-SOUFFRANCE D'UNE FICHE — le compte, collé au nom de la boîte. */
+.boite__souffrance {
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 1;
+  color: var(--attente);
+  border: 1px solid color-mix(in srgb, var(--attente) 50%, transparent);
+  border-radius: 999px;
+  padding: 2px 5px;
+}

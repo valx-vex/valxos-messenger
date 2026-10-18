@@ -1,0 +1,23 @@
+{
+  "name": "valxos-messenger",
+  "version": "1.0.0",
+  "description": "VALXOS Messenger (formerly cc2cc-v2 / CEREAL): durable inter-instance messaging for coding sessions.",
+  "author": {
+    "name": "VALXOS contributors"
+  },
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "valxos-messenger",
+    "messaging",
+    "mcp",
+    "hooks",
+    "monitor",
+    "sqlite"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./mcp.json",
+  "skills": "./skills",
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
+}

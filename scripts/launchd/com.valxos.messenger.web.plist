@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- written by valxos-messenger install -->
+<!-- The web door of VALXOS Messenger. It listens on the loopback interface
+     only. Its operator (VALXOS_WEB_OPERATEUR) comes from web.env unless
+     `--operator` pinned one below, which then takes precedence over web.env.
+     Re-run `valxos-messenger install --launchd [--operator NAME]` to refresh
+     this file after moving the repository or updating Node (this file names
+     a node path); `valxos-messenger uninstall` removes it. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.valxos.messenger.web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__REPO_ROOT__/src/bin/valxos-web.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>VALXOS_MESSENGER_HOME</key>
+    <string>__RUNTIME_HOME__</string>
+    __OPERATOR_ENTRY__
+    <key>PATH</key>
+    <string>__NODE_DIR__:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__RUNTIME_HOME__/logs/web.log</string>
+  <key>StandardErrorPath</key>
+  <string>__RUNTIME_HOME__/logs/web.log</string>
+</dict>
+</plist>

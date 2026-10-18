@@ -1,0 +1,15 @@
+node_modules/
+coverage/
+.DS_Store
+*.log
+*.db
+*.db-shm
+*.db-wal
+tmp/
+.claude/
+# Python bytecode: the monitor, launched from the tree, writes src/monitor/__pycache__/*.pyc
+# when anything imports it; the file carries the machine's account name and NUL bytes.
+__pycache__/
+*.pyc
+# Identities the guards must also refuse, declared locally — never published.
+test/.identites-locales.json

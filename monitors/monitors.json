@@ -1,0 +1,7 @@
+[
+  {
+    "name": "valxos-messenger-inbox",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/src/monitor/valxos_monitor.py\"",
+    "description": "VALXOS Messenger (formerly cc2cc-v2 / CEREAL) inbox delivery monitor"
+  }
+]

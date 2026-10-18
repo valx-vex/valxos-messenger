@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/valx-vex/valxos-messenger/security/advisories/new
+    about: Private security advisory. Never use a public issue for this.
+  - name: Known limitations
+    url: https://github.com/valx-vex/valxos-messenger#known-limitations
+    about: Documented rough edges. Please read before filing a bug.
