@@ -369,3 +369,24 @@ test("une résolution qui LÈVE n'empêche pas la lettre de partir", async (t) =
   // L'abstention se dit aussi toute seule.
   assert.equal(resoudreSansCasser(db, "alpha", { resoudre }), null);
 });
+
+// B10 (relecture du guichet) — AUCUNE LETTRE SANS DESTINATAIRE. Sans `recipient` ni `to`, la base
+// levait une erreur SANS code ; avec un destinataire BLANC (« ␠␠␠ », un retour à la ligne), la lettre
+// s'écrivait à ce blanc. Le guichet refuse les deux, avant l'enclos et avant toute écriture :
+// `adresse-invalide`, un code que les surfaces rendent.
+test("B10 — posterUneLettre sans destinataire, ou à un destinataire blanc : adresse-invalide, rien d'écrit", async (t) => {
+  const db = bureauDePoste(t);
+  const deps = { reveiller: async () => ({ ok: false }), maisons: { houses: [], parSession: new Map() } };
+  for (const entree of [
+    { sender: "alice", body: "x" },
+    { sender: "alice", recipient: "", body: "x" },
+    { sender: "alice", recipient: "   ", body: "x" },
+    { sender: "alice", to: "\n\t", body: "x" },
+    { sender: "alice", recipient: " ", to: "bob", body: "x" }
+  ]) {
+    await assert.rejects(() => posterUneLettre(db, entree, deps), (erreur) => erreur.code === "adresse-invalide", JSON.stringify(entree));
+  }
+  assert.equal(db.prepare("SELECT count(*) AS n FROM messages").get().n, 0, "aucune lettre écrite");
+  const { row } = await posterUneLettre(db, { sender: "alice", to: "bob", body: "x" }, deps);
+  assert.equal(row.recipient, "bob", "le contrôle : une lettre adressée part");
+});

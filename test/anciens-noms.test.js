@@ -35,6 +35,7 @@ import {
   resolveRecipient
 } from "../src/lib/registry.js";
 import { posterUneLettre } from "../src/lib/guichet.js";
+import { enclosDe } from "../src/lib/tables.js";
 import { trouverLaBoite } from "../src/facteur/round.js";
 import { envPropre, poserLeBureau } from "./aide-env.js";
 
@@ -500,7 +501,7 @@ test("ALIAS : listerAlias rend les alias comme des alias, jamais comme des pairs
   ]);
 });
 
-// ── La migration 5 → 6 sur un bureau jetable : chaque ligne survit ─────────
+// ── La migration 5 → 7 sur un bureau jetable : chaque ligne survit ─────────
 
 function bureauEnV5(t) {
   const root = tempHome();
@@ -532,7 +533,7 @@ function bureauEnV5(t) {
   return db;
 }
 
-test("MIGRATION 5 → 6 : chaque ligne survit, la colonne arrive à 0, le tampon passe à 6", (t) => {
+test("MIGRATION 5 → 7 (par 6) : chaque ligne survit, la marque d'alias arrive à 0, le tampon passe au schéma courant", (t) => {
   const db = bureauEnV5(t);
   const photo = (table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
   const avant = Object.fromEntries(["peers", "messages", "anciens_noms", "delivery_events"].map((tb) => [tb, photo(tb)]));
@@ -540,20 +541,198 @@ test("MIGRATION 5 → 6 : chaque ligne survit, la colonne arrive à 0, le tampon
 
   const bilan = migrate(db);
   assert.equal(bilan.from, 5);
-  assert.equal(bilan.to, 6);
+  assert.equal(bilan.to, SCHEMA_VERSION);
   assert.deepEqual(bilan.manquantes, []);
-  assert.equal(schemaVersion(db), 6);
-  for (const table of ["peers", "messages", "delivery_events"]) {
-    assert.deepEqual(photo(table), avant[table], `${table} : pas une ligne ne bouge`);
-  }
+  assert.equal(schemaVersion(db), SCHEMA_VERSION);
+  assert.deepEqual(sansLesColonnes8Peers(photo("peers")), avant.peers, "peers : pas une ligne ne bouge");
+  assert.deepEqual(photo("delivery_events"), avant.delivery_events, "delivery_events : pas une ligne ne bouge");
+  // Les colonnes de la version 7 arrivent à leur défaut ; le reste de la lettre ne bouge pas.
+  assert.deepEqual(sansLesColonnes7(photo("messages")), avant.messages, "messages : pas une ligne ne bouge");
   const anciens = photo("anciens_noms");
   assert.deepEqual(anciens.map(({ prioritaire, ...reste }) => reste), avant.anciens_noms);
   assert.deepEqual(anciens.map((r) => r.prioritaire), [0], "un renvoi d'avant n'est jamais promu en silence");
   // La contrainte vit aussi sur la colonne ajoutée : une marque hors {0,1} ne s'écrit pas.
   assert.throws(() => db.prepare("UPDATE anciens_noms SET prioritaire = 2").run(), /CHECK/);
   // Rejouer ne change rien.
-  assert.deepEqual(migrate(db).to, 6);
+  assert.deepEqual(migrate(db).to, SCHEMA_VERSION);
   assert.deepEqual(photo("anciens_noms"), anciens);
+});
+
+// Les colonnes que la version 7 ajoute à `messages` : la photo d'avant ne les
+// porte pas, celle d'après les porte à leur défaut. On compare le reste.
+const COLONNES_7 = ["envoi_id", "table_nom", "reponse_a", "sans_reveil", "sans_copie", "sender_chaise", "reservices"];
+const DEFAUTS_7 = { envoi_id: null, table_nom: null, reponse_a: null, sans_reveil: 0, sans_copie: 0, sender_chaise: null, reservices: 0 };
+// Et celles que la version 8 (le relais) ajoute : `messages` en gagne six, `peers` une.
+const COLONNES_8_MESSAGES = ["via", "mac_origine", "porte_at", "porte_vers", "remise_rendue_at", "accuse_rendu_at"];
+const COLONNES_8_PEERS = ["designe_at"];
+function sansLesColonnes7(lignes) {
+  return lignes.map((ligne) => Object.fromEntries(Object.entries(ligne).filter(([cle]) => !COLONNES_7.includes(cle) && !COLONNES_8_MESSAGES.includes(cle))));
+}
+function sansLesColonnes8Peers(lignes) {
+  return lignes.map((ligne) => Object.fromEntries(Object.entries(ligne).filter(([cle]) => !COLONNES_8_PEERS.includes(cle))));
+}
+
+// ── La migration 6 → 7 sur un bureau jetable : chaque ligne survit ─────────
+
+function bureauEnV6(t) {
+  const root = tempHome();
+  const fichier = path.join(root, "broker.db");
+  const db = new Database(fichier);
+  initSchema(db);
+  // Le bureau tel que la version 6 le laissait : toutes les colonnes d'avant,
+  // le registre AVEC `prioritaire`, et le tampon 6. Ni table de tables, ni
+  // enclos, ni colonne de lettre de table.
+  for (const [table, col, type] of [
+    ["peers", "lineage", "TEXT"], ["peers", "house", "TEXT"], ["peers", "instance_session_id", "TEXT"],
+    ["peers", "is_primary", "INTEGER NOT NULL DEFAULT 0"], ["peers", "heartbeat_at", "TEXT"],
+    ["peers", "proc_start", "TEXT"], ["peers", "dead_at", "TEXT"], ["peers", "session_name", "TEXT"],
+    ["messages", "sender_model", "TEXT"], ["messages", "carried_at", "TEXT"],
+    ["messages", "facteur_not_before_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (facteur_not_before_ms >= 0)"]
+  ]) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+  db.exec(`CREATE TABLE anciens_noms (
+     ancien_nom TEXT PRIMARY KEY CHECK (length(trim(ancien_nom)) > 0),
+     lignee TEXT NOT NULL CHECK (length(trim(lignee)) > 0),
+     note TEXT, depose_at TEXT NOT NULL,
+     prioritaire INTEGER NOT NULL DEFAULT 0 CHECK (prioritaire IN (0,1)),
+     CHECK (ancien_nom <> lignee))`);
+  // Les deux tables du Facteur, telles que la version 6 les portait (migrations.js,
+  // `TABLES` avant le schéma 7) : un vrai bureau 6 les a, et la migration 7 ne doit
+  // toucher à aucune de leurs lignes.
+  db.exec(`CREATE TABLE facteur_attempts (
+     attempt_id         TEXT PRIMARY KEY
+                        CHECK (length(attempt_id) >= 32),
+     msg_id             TEXT NOT NULL
+                        REFERENCES messages(msg_id) ON DELETE RESTRICT,
+     owner_id           TEXT NOT NULL,
+     state              TEXT NOT NULL
+                        CHECK (state IN ('reservee', 'liee', 'remise', 'echouee', 'expiree')),
+     claimed_at_ms      INTEGER NOT NULL CHECK (claimed_at_ms >= 0),
+     lease_until_ms     INTEGER NOT NULL,
+     finished_at_ms     INTEGER,
+     target_house       TEXT,
+     target_session_id  TEXT,
+     target_proc_start  TEXT,
+     target_socket_path TEXT,
+     reason             TEXT,
+     CHECK (lease_until_ms > claimed_at_ms),
+     CHECK (
+       (state = 'reservee' AND finished_at_ms IS NULL AND target_session_id IS NULL)
+       OR
+       (state = 'liee' AND finished_at_ms IS NULL
+          AND target_house IS NOT NULL AND target_session_id IS NOT NULL
+          AND target_socket_path IS NOT NULL)
+       OR
+       (state IN ('remise', 'echouee', 'expiree') AND finished_at_ms IS NOT NULL)
+     )
+   )`);
+  db.exec(`CREATE TABLE facteur_sweep (
+     singleton     INTEGER PRIMARY KEY CHECK (singleton = 1),
+     sweep_max_seq INTEGER NOT NULL DEFAULT 0 CHECK (sweep_max_seq >= 0),
+     cursor_seq    INTEGER NOT NULL DEFAULT 0 CHECK (cursor_seq >= 0),
+     CHECK (cursor_seq <= sweep_max_seq)
+   )`);
+  db.pragma("user_version = 6");
+  db.prepare(`INSERT INTO peers (id, status, registered_at, last_seen, lineage, instance_session_id, is_primary, session_name)
+    VALUES ('alice#sess-1', 'active', ?, ?, 'alice', 'sess-1', 1, 'atelier')`).run(T0, T0);
+  db.prepare(`INSERT INTO peers (id, status, registered_at, last_seen) VALUES ('carol', 'active', ?, ?)`).run(T0, T0);
+  db.prepare(`INSERT INTO messages (msg_id, sender, recipient, subject, body, created_at, carried_at, sender_model)
+    VALUES ('v6-1', 'bob', 'alice', 'lettre de la version 6', 'Le phare compte les vagues avant la nuit.', ?, ?, 'modele-test')`).run(T0, T0);
+  db.prepare("INSERT INTO anciens_noms (ancien_nom, lignee, note, depose_at, prioritaire) VALUES ('claude-alice', 'alice', 'v6', ?, 1)").run(T0);
+  db.prepare("INSERT INTO delivery_events (msg_id, agent_id, event_type, detail_json) VALUES ('v6-1', 'bob', 'sent', '{}')").run();
+  db.prepare(`INSERT INTO facteur_attempts (attempt_id, msg_id, owner_id, state, claimed_at_ms, lease_until_ms, finished_at_ms, reason)
+    VALUES ('tentative-v6-zzzzzzzzzzzzzzzzzzzzzzzz', 'v6-1', 'facteur-test', 'echouee', 1000, 2000, 1500, 'lettre de la version 6')`).run();
+  db.prepare("INSERT INTO facteur_sweep (singleton, sweep_max_seq, cursor_seq) VALUES (1, 4, 2)").run();
+  t.after(() => { try { db.close(); } catch { /* base jetable */ } });
+  return db;
+}
+
+test("MIGRATION 6 → 7 : chaque ligne survit, les colonnes neuves arrivent à leur défaut, les trois tables naissent vides, le tampon passe à 7", (t) => {
+  const db = bureauEnV6(t);
+  const photo = (table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
+  const TABLES_6 = ["peers", "messages", "anciens_noms", "delivery_events", "facteur_attempts", "facteur_sweep"];
+  const avant = Object.fromEntries(TABLES_6.map((tb) => [tb, photo(tb)]));
+  assert.equal(avant.facteur_attempts.length, 1, "SONDE : le décor porte une tentative du Facteur");
+  assert.deepEqual(avant.facteur_sweep, [{ singleton: 1, sweep_max_seq: 4, cursor_seq: 2 }], "SONDE : le décor porte un balayage non nul");
+  assert.equal(schemaVersion(db), 6);
+  const nouvelles = () => db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tables', 'table_membres', 'enclos') ORDER BY name")
+    .all()
+    .map((r) => r.name);
+  assert.deepEqual(nouvelles(), [], "SONDE : le décor est bien un bureau d'avant les tables");
+
+  const bilan = migrate(db);
+  assert.equal(bilan.from, 6);
+  assert.equal(bilan.to, 8);
+  assert.equal(SCHEMA_VERSION, 8, "une table neuve monte la version : sinon la version ne distingue rien");
+  assert.deepEqual(bilan.manquantes, []);
+  assert.deepEqual(bilan.tablesManquees, []);
+  assert.deepEqual(bilan.indexesManques, []);
+  assert.equal(schemaVersion(db), 8);
+  assert.deepEqual(sansLesColonnes8Peers(photo("peers")), avant.peers, "peers : pas une ligne ne bouge");
+  for (const table of ["anciens_noms", "delivery_events", "facteur_attempts", "facteur_sweep"]) {
+    assert.deepEqual(photo(table), avant[table], `${table} : pas une ligne ne bouge`);
+  }
+  const lettres = photo("messages");
+  assert.deepEqual(sansLesColonnes7(lettres), avant.messages, "messages : pas une ligne ne bouge, pas un champ d'avant");
+  for (const lettre of lettres) {
+    for (const [colonne, defaut] of Object.entries(DEFAUTS_7)) {
+      assert.equal(lettre[colonne], defaut, `une lettre d'avant porte ${colonne} à son défaut`);
+    }
+  }
+  assert.deepEqual(nouvelles(), ["enclos", "table_membres", "tables"]);
+  for (const table of nouvelles()) {
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, `${table} naît vide : une migration n'invente aucune table`);
+  }
+  const index = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('idx_messages_envoi', 'idx_messages_table_seq', 'idx_table_membres_adresse') ORDER BY name")
+    .all()
+    .map((r) => r.name);
+  assert.deepEqual(index, ["idx_messages_envoi", "idx_messages_table_seq", "idx_table_membres_adresse"]);
+  // L'enclos se retire en se MARQUANT : ses deux colonnes de retrait sont là.
+  assert.deepEqual(
+    db.prepare("PRAGMA table_info(enclos)").all().map((c) => c.name),
+    ["expediteur", "nom_table", "pose_par", "pose_le", "retire_par", "retire_le"]
+  );
+  // Rejouer ne change rien.
+  assert.equal(migrate(db).to, 8);
+  assert.deepEqual(photo("messages"), lettres);
+  assert.deepEqual(photo("anciens_noms"), avant.anciens_noms);
+  assert.deepEqual(photo("facteur_attempts"), avant.facteur_attempts);
+  assert.deepEqual(photo("facteur_sweep"), avant.facteur_sweep);
+});
+
+test("MIGRATION 7 intermédiaire → 7 : un bureau déjà tamponné 7 dont l'enclos n'a pas ses colonnes de retrait les reçoit, ses lignes ne bougent pas", (t) => {
+  // `CREATE TABLE IF NOT EXISTS` ne rajoute jamais une colonne : sans
+  // `ADDITIONS_APRES_TABLES`, un bureau passé par une version 7 d'avant le
+  // retrait doux garderait un enclos sans `retire_le`, et l'enclos ne se lirait plus.
+  const root = tempHome();
+  const db = new Database(path.join(root, "broker.db"));
+  initSchema(db);
+  db.exec(`CREATE TABLE enclos (
+     expediteur TEXT PRIMARY KEY CHECK (length(trim(expediteur)) > 0),
+     nom_table  TEXT NOT NULL,
+     pose_par   TEXT,
+     pose_le    TEXT NOT NULL
+   )`);
+  db.pragma("user_version = 7");
+  db.prepare("INSERT INTO enclos (expediteur, nom_table, pose_par, pose_le) VALUES ('bob', 'fermee-test', 'alice', ?)").run(T0);
+  t.after(() => { try { db.close(); } catch { /* base jetable */ } });
+  const avant = db.prepare("SELECT * FROM enclos").all();
+  assert.equal(schemaVersion(db), 7);
+
+  const bilan = migrate(db);
+  assert.equal(bilan.from, 7);
+  assert.equal(bilan.to, 8);
+  assert.deepEqual(bilan.manquantes, []);
+  assert.deepEqual(bilan.colonnesRatees, []);
+  assert.deepEqual(
+    db.prepare("PRAGMA table_info(enclos)").all().map((c) => c.name),
+    ["expediteur", "nom_table", "pose_par", "pose_le", "retire_par", "retire_le"]
+  );
+  assert.deepEqual(db.prepare("SELECT expediteur, nom_table, pose_par, pose_le FROM enclos").all(), avant, "la ligne d'avant ne bouge pas");
+  assert.deepEqual(db.prepare("SELECT retire_par, retire_le FROM enclos").all(), [{ retire_par: null, retire_le: null }], "elle arrive active");
+  assert.deepEqual(enclosDe(db, "bob"), { expediteur: "bob", nom_table: "fermee-test", pose_par: "alice", pose_le: T0 }, "et l'enclos se lit encore");
+  assert.equal(migrate(db).to, 8, "rejouer ne change rien");
 });
 
 // ── La porte humaine : valxos-chaise alias ─────────────────────────────────

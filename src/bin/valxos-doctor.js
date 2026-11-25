@@ -12,6 +12,10 @@ import { homeDir, pluginTargetPath, repoRoot, runtimePaths, seuilsDeSouffrance }
 import { SERVICES, labelsDesactives, launchctlUtilise, legacyLabels, plistPath } from "../lib/launchd-labels.js";
 import { parseArgs, printJson } from "./cli-common.js";
 import { ETATS_LISIBLES, etatDeLaLettre } from "../lib/format.js";
+import { fichesCodex, moissonnerLesFichesCodex, processusDeLaFiche } from "../lib/chaise-codex.js";
+// Les RÈGLES de la porte Codex, jamais la porte elle-même (porte-codex.js porte
+// un lanceur et ne se charge que dans les processus du Facteur).
+import { DELAI_SONNETTE_MS, lienDuFil } from "../facteur/porte-codex-regles.js";
 
 // N4 : les arguments se tranchent AVANT le bureau — un drapeau inconnu ou un
 // mot nu ne crée rien, n'ouvre rien.
@@ -63,6 +67,21 @@ if (lisible) {
 // sont des alias de compatibilité, lus ICI et nulle part ailleurs, pour
 // que les deux formes ne puissent pas diverger.
 const bilanMoisson = { mode: moisson.mode, checked: moisson.checked, reaped: moisson.reaped, abstained: moisson.abstained };
+// LA MOISSON DES FICHES CODEX, après celle des chaises et sous la même règle :
+// un rapport sans --reap (les candidates comptées, rien d'écrit), une moisson
+// avec. Son horloge est la sienne (le processus parti ET 24 h sans un hook) :
+// `moissonnerLesFichesCodex` (chaise-codex.js). Un bureau illisible (ancien) ne
+// se moissonne pas. Une erreur se dit dans la section `codex` ; elle ne rougit
+// pas `ok`.
+let moissonCodex = { mode: reap ? "moisson" : "rapport", checked: 0, reaped: [], abstained: [] };
+let moissonCodexErreur = null;
+if (lisible) {
+  try {
+    moissonCodex = moissonnerLesFichesCodex(db, { dryRun: !reap });
+  } catch (erreur) {
+    moissonCodexErreur = String(erreur?.message || erreur);
+  }
+}
 let claudeVersion = null;
 try {
   // `claude` inherits the whole environment on purpose: it is the operator's
@@ -71,6 +90,79 @@ try {
   claudeVersion = execFileSync("claude", ["--version"], { encoding: "utf8" }).trim();
 } catch {
   claudeVersion = "unavailable";
+}
+// LES CHAISES CODEX (1.1.0, spec B §5). Le médecin lance `codex --version`, et
+// RIEN d'autre : jamais une session, jamais `codex queue` (la sonnette est
+// l'affaire du Facteur). Trois issues : la version ; `absent` (aucun `codex`
+// sur le PATH) ; `unavailable` (présent, mais il a échoué ou n'a pas répondu
+// dans le délai de la sonnette).
+// ⚠️ `codex --version` ÉCRIT dans sa maison (sonde du 22/10, codex-cli
+// 0.163.0) : `<CODEX_HOME>/tmp/arg0-macos/codex-arg0…/{.lock,apply_patch,
+// applypatch}`, à chaque appel. Le médecin n'écrit nulle part : il lui donne
+// donc une maison qui ne peut pas exister (`/dev/null/…`, sous un fichier).
+// Codex le dit sur stderr (« could not create PATH aliases »), rend sa
+// version, sort 0, et ne crée rien.
+const MAISON_CODEX_IMPOSSIBLE = "/dev/null/valxos-doctor";
+function versionDeCodex() {
+  try {
+    const sortie = execFileSync("codex", ["--version"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: DELAI_SONNETTE_MS,
+      env: { ...process.env, CODEX_HOME: MAISON_CODEX_IMPOSSIBLE }
+    }).trim();
+    return sortie || "unavailable";
+  } catch (erreur) {
+    return erreur?.code === "ENOENT" ? "absent" : "unavailable";
+  }
+}
+
+// La socket du démon partagé de Codex (`<codex_home>/app-server-control/
+// app-server-control.sock`, un lien vers /tmp sous macOS) : un lstat, jamais
+// une connexion.
+function socketDuDemon(codexHome) {
+  if (typeof codexHome !== "string" || !codexHome) return { path: null, present: false };
+  const socket = path.join(codexHome, "app-server-control", "app-server-control.sock");
+  try {
+    fs.lstatSync(socket);
+    return { path: socket, present: true };
+  } catch {
+    return { path: socket, present: false };
+  }
+}
+
+// Chaque fiche `<bureau>/codex/<lignée>.json` telle que le Facteur la lit,
+// plus ce que le médecin constate sans rien toucher : le pid vit-il, la carte
+// du registre (muette sur un bureau ancien, que le médecin ne lit pas), le
+// lien du fil, la socket du démon. Une lecture qui lève se dit en `erreur` :
+// le médecin ne rend jamais une pile.
+function sectionCodex() {
+  let fiches = [];
+  let erreur = moissonCodexErreur;
+  try {
+    fiches = fichesCodex(lisible ? db : null).map((fiche) => ({
+      lineage: fiche.lineage,
+      thread_id: fiche.thread_id,
+      porte: fiche.porte ?? null,
+      codex_home: fiche.codex_home ?? null,
+      pid: fiche.pid ?? null,
+      // La règle de la moisson : un pid vivant sous une autre naissance n'est plus la chaise.
+      pid_vivant: processusDeLaFiche(fiche) === "vivant",
+      last_seen: fiche.last_seen ?? null,
+      dead_at: fiche.dead_at ?? null,
+      statut_carte: fiche.peer?.status ?? null,
+      lien: lienDuFil(fiche.thread_id),
+      demon_socket: socketDuDemon(fiche.codex_home)
+    }));
+  } catch (lecture) {
+    erreur = erreur ?? String(lecture?.message || lecture);
+  }
+  return {
+    version: versionDeCodex(),
+    count: fiches.length,
+    fiches,
+    moisson: moissonCodex,
+    ...(moissonCodex.mode === "rapport" && moissonCodex.reaped.length > 0 ? { remede: "valxos-doctor --reap" } : {}),
+    ...(erreur ? { erreur } : {})
+  };
 }
 
 // PRÉSENT n'est pas EXÉCUTABLE — S1 (remède de la revue adverse) : facteur.js était un lien
@@ -182,6 +274,8 @@ const checks = {
   facteur: etatDuFacteur(),
   // The web door: reports whether web.env exists (required to start).
   webEnvExists: webEnvExists(),
+  // Les chaises Codex (1.1.0) : la version de `codex`, chaque fiche, son pid.
+  codex: sectionCodex(),
   // N2 : rouge quand un plist historique non désactivé est à côté des nôtres.
   launchdLegacy: plistsHistoriques(),
   // Un bureau d'une version plus ancienne, lu en lecture seule : le médecin n'a
@@ -278,6 +372,8 @@ const checks = {
 // reports their state (checks.facteur.running, checks.webEnvExists) but
 // does NOT include them in `ok`. A green `ok` means the INSTALLATION is
 // complete — the operator starts the Facteur and the web door separately.
+// The `codex` section does not enter `ok` either: a machine without Codex is
+// a complete installation, and a silent Codex chair is not a broken install.
 // N2 : un plist historique activé (ou d'état inconnu) à côté des nôtres
 // relancerait la vieille porte sur 8790 à la connexion suivante.
 checks.launchdLegacyOk = !(checks.launchdLegacy.aCoteDesNotres && checks.launchdLegacy.nonDesactives.length > 0);

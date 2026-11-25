@@ -182,7 +182,7 @@ function lancerScript(t, interprete, script, args, ajouts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "valxos-trois-sans-aide-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const r = spawnSync(interprete, [path.join(repo, script), ...args], {
-    encoding: "utf8", timeout: 5000, env: envPropre({ CC2CC_V2_HOME: root, CC2CC_SELF: "testeur", ...ajouts })
+    encoding: "utf8", timeout: 5000, env: envPropre({ CC2CC_V2_HOME: root, CC2CC_SELF: "testeur", HOME: root, ...ajouts })
   });
   return { r, root };
 }

@@ -26,6 +26,9 @@ import { nowIso, reglagesDuFacteur, runtimePaths, verifierLesReglages } from "..
 import { getDatabase } from "../lib/database.js";
 import { isProcessAlive, procStartOf } from "../lib/postbox.js";
 import { tourneeBougee, faireLaTournee as faireLaTourneeReelle } from "./round.js";
+// La porte Codex (1.1.0) : le démon la TEND à la tournée, qui ne la charge pas
+// elle-même (round.js est chargé par la porte web, qui ne lance rien).
+import { sonnerLaChaiseCodex as sonnerLaChaiseCodexReelle } from "./porte-codex.js";
 
 export function cheminDuVerrou() {
   return path.join(runtimePaths().run, "facteur.verrou");
@@ -101,8 +104,10 @@ export function prendreLeVerrou(
   // Le contenu s'écrit donc dans un brouillon, et le brouillon prend son nom
   // définitif par un lien DUR : `link` est atomique et REFUSE d'écraser — c'est
   // l'exclusion mutuelle et la naissance complète dans le même geste.
+  // Le brouillon porte le nom du verrou qu'il prépare (`.facteur.verrou.<uuid>`
+  // pour le Facteur ; le relais prend le sien, `relais.verrou`, par ici aussi).
   const poser = () => {
-    const brouillon = path.join(path.dirname(chemin), `.facteur.verrou.${crypto.randomUUID()}`);
+    const brouillon = path.join(path.dirname(chemin), `.${path.basename(chemin)}.${crypto.randomUUID()}`);
     try {
       fs.writeFileSync(brouillon, `${JSON.stringify({ pid, proc_start: naissance, depuis: nowIso() })}\n`, {
         mode: 0o600
@@ -227,8 +232,17 @@ export async function demarrerLeFacteur(options = {}) {
     // tournées sont restées muettes depuis le dernier battement.
     let tourneesSilencieuses = 0;
     let dernierBattement = horloge();
+    // La mémoire du retour à l'expéditeur : elle traverse les tournées, pour que le balayage
+    // tourne au plus une fois par minute (retour.js, `leBalayageEstDu`), pas chaque seconde.
+    const memoireDuRetour = {};
     while (faites < tours && !signal?.aborted) {
-      const bilan = await faireLaTournee(bureau, { ...depsDeTournee, reglages: complets, journal });
+      const bilan = await faireLaTournee(bureau, {
+        sonnerLaChaiseCodex: sonnerLaChaiseCodexReelle,
+        memoireDuRetour,
+        ...depsDeTournee,
+        reglages: complets,
+        journal
+      });
       faites += 1;
       if (!(bilan && tourneeBougee(bilan))) tourneesSilencieuses += 1;
       const maintenant = horloge();

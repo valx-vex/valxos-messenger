@@ -136,7 +136,7 @@ test("CONTRIBUTING.md cites files, a function and a dependency count that exist"
   assert.match(read(".github/PULL_REQUEST_TEMPLATE.md"), /src\/lib\/guichet\.js/, "the PR template names the single posting implementation");
 });
 
-test("SECURITY.md's known issues describe the door as it is: the refusal labels exist, the cookie is what it says", () => {
+test("SECURITY.md's known issues describe the door as it is: the refusal labels exist, the cookie is what it says", async () => {
   const security = read("SECURITY.md");
   const server = read("src/web/serveur.js");
   const auth = read("src/web/auth.js");
@@ -150,6 +150,29 @@ test("SECURITY.md's known issues describe the door as it is: the refusal labels 
   assert.doesNotMatch(auth, /;\s*Secure\b/, "and the cookie really has no Secure flag");
   assert.match(auth, /HttpOnly; SameSite=Strict/, "what the cookie does carry");
   assert.match(security, /At-least-once/, "the delivery rule is stated");
+  // 1.1.0: the Codex doorbell's envelope never carries a body (it reaches the
+  // model as the user's own words) and travels on a command line; closed
+  // tables give no copy; tables and enclosures are not boundaries.
+  const securite = security.replace(/\s+/g, " ");
+  for (const phrase of [
+    "**The Codex doorbell carries an envelope, never a body.**",
+    "`enveloppeDeSonnette` in `src/lib/sonnette.js`",
+    "**Tables and enclosures are conveniences, not boundaries.**",
+    "`hors_enclos: true`",
+    "**`envoi_status` is served to the sender only**",
+    "**The shared position of a table is untrusted text**",
+    "**The Codex envelope travels on a command line.**"
+  ]) assert.ok(securite.includes(phrase), `SECURITY.md: ${phrase}`);
+  const modele = securite.slice(securite.indexOf("## Threat model"), securite.indexOf("## Known and accepted issues"));
+  assert.ok(modele.includes("**The Codex doorbell carries an envelope, never a body.**"), "the envelope is part of the threat model, not a known issue");
+  const { enveloppeDeSonnette, LONGUEUR_SUJET_SONNETTE } = await import("../src/lib/sonnette.js");
+  const enveloppe = enveloppeDeSonnette([{ sender: "alice", subject: "s".repeat(80), body: "BODY-NEVER-HERE", priority: "high" }], { destinataire: "bob" });
+  assert.ok(!enveloppe.includes("BODY-NEVER-HERE"), "the envelope really carries no body");
+  assert.equal(LONGUEUR_SUJET_SONNETTE, 60, "and cuts the subject at the 60 characters SECURITY.md says");
+  assert.ok(securite.includes("a subject cut at 60 characters"), "SECURITY.md says 60");
+  const { argumentsDeSonnette } = await import("../src/facteur/porte-codex-regles.js");
+  assert.deepEqual(argumentsDeSonnette({ thread_id: "t" }, enveloppe).slice(-2), ["--message", enveloppe], "the envelope is an argument of codex queue: a command line");
+  assert.match(read("src/lib/database.js"), /sans_copie = 0/, "and the copies leave out the letters of a closed table");
 });
 
 // F11 (passe adverse du Run 6, 28/09) — LE README COMPTE CE QUE package.json
@@ -161,7 +184,7 @@ test("F11 — le README compte les exécutables comme package.json les publie", 
   const anciens = noms.filter((n) => n.startsWith("cc2cc-")).length;
   const neufs = noms.filter((n) => n.startsWith("valxos-") && n !== "valxos-messenger").length;
   assert.equal(anciens + neufs + 2, noms.length, "sonde impossible : le décompte ne couvre pas tout le bin");
-  const MOTS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  const MOTS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen"];
   const readme = fs.readFileSync(path.join(repo, "README.md"), "utf8").replace(/\s+/g, " ");
   assert.ok(readme.includes(`The ${MOTS[anciens]} \`cc2cc-*\` executables`), `le README doit dire ${MOTS[anciens]} cc2cc-*`);
   assert.ok(readme.includes(`the ${MOTS[neufs]} \`valxos-*\` names`), `le README doit dire ${MOTS[neufs]} valxos-*`);
@@ -196,43 +219,99 @@ function table(texteDeSection) {
 
 const HARNAIS_PROUVES = ["Claude Code", "Codex CLI", "Gemini CLI", "Antigravity CLI (agy)", "OpenCode", "Hermes"];
 
-for (const [fichier, titre, colonne, oui, non, autre] of [
-  // « oui » est borné à ce que le reçu du 18/10 a vu : la session interactive.
-  ["README.md", "Harness support", "Woken by the Facteur", /^yes, interactive sessions \(see details\)$/, /^no\b/, "Any other MCP client"],
-  ["README.fr.md", "Harnais pris en charge", "Réveillé par le Facteur", /^oui, en session interactive \(voir détails\)$/, /^non\b/, "Tout autre client MCP"]
+// Ce que la colonne « réveillé » promet, harnais par harnais (1.1.0) : Claude
+// Code par son socket (reçu du 18/10/2026, session interactive) ; Codex par
+// `codex queue`, livré mais PAS ENCORE VU EN DIRECT (revue de la Tâche 12,
+// finding 4 : le reçu du 21/10/2026 a vu `codex queue` réveiller un fil inactif
+// avec un hook de substitution, jamais la porte du Facteur ni le hook livré).
+// La cellule le dit, et la ligne renvoie à la section qui dit ce qui a été vu.
+// Tout autre harnais relève lui-même. L'oracle du « oui » de Codex est la porte Codex du Facteur : ses
+// arguments sont ceux de `codex queue`, et la porte s'en sert. La colonne
+// « Hooks » suit : Claude Code et Codex en ont, les autres non.
+for (const [fichier, titre, colonne, reveilles, non, autre] of [
+  ["README.md", "Harness support", "Woken by the Facteur",
+    new Map([["Claude Code", /^yes, interactive sessions \(see details\)$/], ["Codex CLI", /^yes \(seen live on a scratch home, 22\/10\/2026\)$/]]),
+    /^no\b/, "Any other MCP client"],
+  ["README.fr.md", "Harnais pris en charge", "Réveillé par le Facteur",
+    new Map([["Claude Code", /^oui, en session interactive \(voir détails\)$/], ["Codex CLI", /^oui \(vu en direct sur une maison jetable, 22\/10\/2026\)$/]]),
+    /^non\b/, "Tout autre client MCP"]
 ]) {
-  test(`${fichier} — une ligne par harnais (Gemini CLI ≠ Antigravity CLI), et seul Claude Code est réveillé par le Facteur`, () => {
+  test(`${fichier} — une ligne par harnais (Gemini CLI ≠ Antigravity CLI) ; Claude Code et Codex sont réveillés par le Facteur, les autres non`, async () => {
     const { entete, lignes } = table(section(read(fichier), titre));
     const reveil = entete.indexOf(colonne);
+    const hooks = entete.indexOf("Hooks");
     assert.ok(reveil > 0, `la table a une colonne « ${colonne} »`);
+    assert.ok(hooks > 0, "la table a une colonne « Hooks »");
     const noms = lignes.map((cellules) => cellules[0].replace(/\*\*/g, ""));
     assert.deepEqual(noms, [...HARNAIS_PROUVES, autre], "les harnais, dans l'ordre, chacun sa ligne");
     for (const cellules of lignes) {
       const nom = cellules[0].replace(/\*\*/g, "");
-      assert.match(cellules[reveil], nom === "Claude Code" ? oui : non, `${nom} : colonne « ${colonne} »`);
+      assert.match(cellules[reveil], reveilles.get(nom) ?? non, `${nom} : colonne « ${colonne} »`);
+      assert.match(cellules[hooks], reveilles.has(nom) ? /^✓/ : /^—$/, `${nom} : colonne « Hooks »`);
     }
+    // La ligne Codex renvoie à la section qui dit ce qui a été vu le 21/10.
+    const codex = lignes.find((cellules) => cellules[0].replace(/\*\*/g, "") === "Codex CLI");
+    assert.ok(codex.at(-1).includes("(docs/MCP_CLIENTS.md#codex-hooks-and-the-doorbell)"), "Codex : le renvoi vers « Codex: hooks and the doorbell »");
+    const { argumentsDeSonnette } = await import("../src/facteur/porte-codex-regles.js");
+    assert.deepEqual(argumentsDeSonnette({ thread_id: "fil" }, "enveloppe"), ["queue", "--thread", "fil", "--message", "enveloppe"], "sonde : la sonnette est `codex queue`");
+    assert.match(read("src/facteur/porte-codex.js"), /argumentsDeSonnette\(/, "sonde : la porte Codex du Facteur s'en sert");
   });
 }
 
-test("README — le paragraphe « What wakes a session » : seules les sessions Claude Code sont réveillées, les autres relèvent", () => {
+test("README — le paragraphe « What wakes a session » : Claude Code et Codex sont réveillés, les autres relèvent (en et fr)", () => {
   const en = read("README.md").replace(/\s+/g, " ");
-  assert.ok(en.includes("**What wakes a session.** Only Claude Code sessions are woken"), "la phrase anglaise");
+  assert.ok(en.includes("**What wakes a session.** Claude Code sessions and Codex sessions are woken; every other harness collects."), "la phrase anglaise");
   assert.ok(en.includes("calling `inbox` (MCP) or `valxos-inbox` (CLI) itself; nothing rings"), "les autres harnais relèvent eux-mêmes");
   // Deux mécanismes, deux preuves : la poussée du Facteur contre un socket de
   // substitution (la suite), le réveil par le moniteur en direct (18/10).
   for (const fait of [
     "the Facteur delivers to the session's own messaging socket, and, on a wake, the plugin monitor prints it",
     // PREUVES/facteur-push-live.md (18/10/2026) : la poussée observée en production.
-    "The Facteur's push into a live Claude Code 2.1.302 session was observed in the authors' house on 18/10/2026 (eight letters delivered to the session socket by the previous release's courier, whose connection logic the 1.0.0 courier keeps unchanged); the test suite verifies the 1.0.0 courier against a stand-in socket; the in-session wake through the plugin monitor was verified live the same day."
+    "The Facteur's push into a live Claude Code 2.1.302 session was observed in the authors' house on 18/10/2026 (eight letters delivered to the session socket by the previous release's courier, whose connection logic the 1.0.0 courier keeps unchanged); the test suite verifies the 1.0.0 courier against a stand-in socket; the in-session wake through the plugin monitor was verified live the same day.",
+    // 1.1.0 : la sonnette Codex — une enveloppe, jamais un corps.
+    // S15 (troisième passe adverse) : la réserve d'avant la marche du 22/10 est datée, pas répétée.
+    "For Codex (with its 1.1.0 hooks installed; seen live once on 22/10/2026, on a scratch home), the Facteur rings the chair with `codex queue` — an envelope, never a letter body — and the Codex hooks inject the mail at the next turn",
+    // 1.1.0 : la lettre calme ne réveille personne, nulle part.
+    "A quiet table letter (`low` priority, a `prochain-tour` rule, a reaction in a `direct` table) wakes nobody: it waits for the next turn."
   ]) assert.ok(en.includes(fait), `README.md : ${fait}`);
   assert.doesNotMatch(en, /There is no real-time push, no presence/, "« no real-time push » sans borne contredit la table");
-  assert.ok(en.includes("There is no real-time push outside a Claude Code session, no presence, no typing indicator. Elsewhere a letter waits until the recipient collects it."), "la phrase bornée");
+  assert.doesNotMatch(en, /Only Claude Code sessions are woken/, "la phrase de la 1.0.0 est fausse en 1.1.0");
+  assert.ok(en.includes("There is no real-time push outside a Claude Code or Codex session, no presence, no typing indicator. Elsewhere a letter waits until the recipient collects it."), "la phrase bornée, Codex compris");
+  // Un statut daté du 21/10/2026 dit ce qu'il veut dire, comme ceux du 18/10.
+  assert.ok(en.includes("A status dated 21/10/2026 means: on that date, on macOS, against a scratch Codex home with a local model, `codex queue` woke an idle session"), "le sens d'un statut du 21/10");
+  assert.ok(en.includes("behaved as the schemas embedded in Codex describe them"), "les schémas embarqués, pas une doc de Codex (finding 7)");
+  assert.doesNotMatch(en, /as Codex documents them/, "le reçu ne cite aucune doc de Codex");
   const fr = read("README.fr.md").replace(/\s+/g, " ");
-  assert.ok(fr.includes("**Ce qui réveille une session.** Seules les sessions Claude Code sont réveillées"), "la phrase française");
+  assert.ok(fr.includes("**Ce qui réveille une session.** Les sessions Claude Code et les sessions Codex sont réveillées ; tout autre harnais relève."), "la phrase française");
+  assert.doesNotMatch(fr, /Seules les sessions Claude Code sont réveillées/, "la phrase française de la 1.0.0 est fausse en 1.1.0");
   for (const fait of [
     "le Facteur remet la lettre au socket de messagerie propre à la session, et, sur un réveil, le moniteur du plugin l'affiche",
-    "La poussée du Facteur dans une session Claude Code 2.1.302 vivante a été observée dans la maison des auteurs le 18/10/2026 (huit lettres remises au socket de la session par le Facteur de la release précédente, dont le Facteur 1.0.0 garde la logique de connexion inchangée) ; la suite de tests vérifie le Facteur 1.0.0 contre un socket de substitution ; le réveil en session par le moniteur du plugin a été vérifié en direct le même jour."
+    "La poussée du Facteur dans une session Claude Code 2.1.302 vivante a été observée dans la maison des auteurs le 18/10/2026 (huit lettres remises au socket de la session par le Facteur de la release précédente, dont le Facteur 1.0.0 garde la logique de connexion inchangée) ; la suite de tests vérifie le Facteur 1.0.0 contre un socket de substitution ; le réveil en session par le moniteur du plugin a été vérifié en direct le même jour.",
+    "Pour Codex (avec ses hooks 1.1.0 installés ; vu en direct une fois le 22/10/2026, sur une maison jetable), le Facteur sonne la chaise par `codex queue` — une enveloppe, jamais un corps de lettre",
+    "Un statut daté du 21/10/2026 veut dire : ce jour-là, sur macOS, contre une maison Codex jetable avec un modèle local, `codex queue` a réveillé une session inactive"
   ]) assert.ok(fr.includes(fait), `README.fr.md : ${fait}`);
+  assert.doesNotMatch(en, /not yet seen in a live session/, "S15 : plus de réserve contraire à la marche du 22/10");
+  assert.doesNotMatch(fr, /pas encore vu en session vivante/, "S15, en français");
+  // S20/S21 (cinquième passe) : deux bords, pas trois — le message d'enclos est corrigé (R3) et
+  // `valxos-table enclos --list` n'existe pas ; « ask for more rows » ne vaut ni au MCP (200) ni au web (500).
+  const journal = read("CHANGELOG.md").replace(/\s+/g, " ");
+  assert.ok(en.includes("Two edges of 1.1.0 are listed in the CHANGELOG"), "README : deux bords");
+  assert.ok(fr.includes("Deux bords de la 1.1.0 sont listés dans le CHANGELOG"), "README.fr : deux bords");
+  assert.ok(journal.includes("The MCP tool's limit stops at 200 rows and the web page's window at 500"), "CHANGELOG : les deux plafonds");
+  assert.ok(journal.includes("A wider `valxos-history --limit`, which is not capped, finds it; narrowing to its thread (`thread_id`, `valxos-history --thread`) finds it unless the hidden letters share that thread."), "CHANGELOG : ce qui retrouve la lettre");
+  for (const [texte, fichier] of [[en, "README.md"], [fr, "README.fr.md"], [journal, "CHANGELOG.md"]]) {
+    assert.doesNotMatch(texte, /enclos --list|ask for more rows|demander plus de lignes|may name an enclosure|peut nommer un enclos|Three edges|Trois bords/i, `${fichier} : les bords d'avant`);
+  }
+  // N4 (re-revue du round 2) : la preuve mesure 5,7 s depuis la LETTRE (sonnerie à +0,35 s, tour à +5,7 s).
+  const clients = read("docs/MCP_CLIENTS.md").replace(/\s+/g, " ");
+  for (const [texte, fichier, phrase] of [
+    [en, "README.md", "an autonomous turn 5.7 s after the letter"],
+    [fr, "README.fr.md", "tour autonome 5,7 s après la lettre"],
+    [clients, "docs/MCP_CLIENTS.md", "an autonomous turn started 5.7 s after the letter"]
+  ]) {
+    assert.ok(texte.includes(phrase), `${fichier} : ${phrase}`);
+    assert.doesNotMatch(texte, /5[.,]7 s (?:later|plus tard)/, `${fichier} : « 5.7 s later » se lisait depuis la sonnerie`);
+  }
 });
 
 // « Proven » sans date est une promesse déguisée en reçu. Une négation
@@ -266,17 +345,20 @@ test("README — chaque renvoi de la table vers docs/MCP_CLIENTS.md vise un titr
   }
 });
 
-test("README — Known limitations : la négociation, les outils différés, le piège de la source npm, l'échéance du moniteur, les chaises qui restent", () => {
+test("README — Known limitations : la négociation, les outils différés (neuf en 1.1.0), le piège de la source npm, l'échéance du moniteur, les chaises qui restent, la sonnette Codex, l'enclos", () => {
   const limites = section(read("README.md"), "Known limitations").replace(/\s+/g, " ");
   const ordre = [
     "Harness parity is incomplete",
     "MCP_PROTOCOL_NEGOTIATION=legacy",
     "_meta['anthropic/alwaysLoad']",
+    "the other nine tools",
     "npm pack --ignore-scripts",
     "Claude Code 2.1.271 and later give Monitor watches a deadline",
     "valxos-chaise moissonner",
-    "The launchd plists written by `valxos-messenger install --launchd` carry no `VALXOS_MAISONS` and no `CLAUDE_CONFIG_DIR`",
-    "The web door's page"
+    "The launchd plists written by `valxos-messenger install --launchd` carry no `CLAUDE_CONFIG_DIR`, and their `VALXOS_MAISONS` is your `~/.claude` path unless the installer ran with a declaration",
+    "The web door's page",
+    "The Codex doorbell rings once per letter",
+    "The enclosure is not a security boundary"
   ];
   let avant = -1;
   for (const fait of ordre) {
@@ -284,37 +366,70 @@ test("README — Known limitations : la négociation, les outils différés, le 
     assert.ok(ici > avant, `Known limitations : « ${fait} » présent, après le précédent`);
     avant = ici;
   }
+  // « neuf » vient du serveur : les outils enregistrés moins ceux marqués alwaysLoad.
+  const serveur = read("src/mcp-server/server.js");
+  const enregistres = [...serveur.matchAll(/server\.registerTool\(\s*"([a-z_]+)"/g)].length;
+  const toujours = (serveur.match(/"anthropic\/alwaysLoad": true/g) || []).length;
+  assert.ok(enregistres >= 9 && toujours >= 3, `sonde impossible : ${enregistres} outil(s), ${toujours} marqué(s)`);
+  const MOTS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  const MOTS_FR = ["zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix", "onze", "douze"];
+  assert.ok(limites.includes(`the other ${MOTS[enregistres - toujours]} tools`), `le README compte ${enregistres - toujours} outils différables, comme server.js`);
+  assert.ok(limites.includes("`inbox`, `send`, `ack` and `reply` are marked always-load"), "reply est dit toujours chargé");
   for (const fait of [
     "Claude Code 2.1.292 and later", "since Claude Code 2.1.275", "`valxos-doctor --reap`", "`name#session`",
     // R7 (PREUVES/moniteur-35min.md, 18/10/2026) : le moniteur passe la deadline.
     "In an interactive Claude Code 2.1.302 session the plugin monitor stayed armed for the whole 40-minute session, past the 30-minute deadline Claude Code gives Monitor watches, and presented a letter posted at minute 33 within 20 ms (18/10/2026). Under `claude -p` the monitor is not armed; the hooks deliver instead.",
     // La porte web calcule son avis d'attente avec la même liste de maisons.
-    "under launchd the Facteur scans `~/.claude` only, and the web door's `attente` advice on a send uses that same list. If your Claude Code configuration lives elsewhere, add the variable to both plists' environment before loading them"
+    "under launchd the Facteur scans that list only, and the web door's `attente` advice on a send uses that same list. If your Claude Code configuration lives elsewhere, run the installer again with the complete list in `VALXOS_MAISONS`",
+    // 1.1.0 : les marques de 1.1.0 sont lues par la suite, pas revues en session.
+    "The 1.1.0 marks (`reply` always loaded; `tables`, `table_manage` and `envoi_status` deferred) are read by the test suite on the running server and were not re-observed in a live session.",
+    // 1.1.0 : la sonnette ne voit pas Échap ; sa raison est une raison de TOURNÉE ; l'enclos n'est pas une frontière.
+    "after Escape in the Codex TUI, a queued envelope waits until the next prompt typed by a human",
+    "`envoi_status` shows `tournee.reason: \"sonnette-codex-impossible\"`",
+    "One chair card per lineage: two Codex sessions served under one name ring the session that wrote the card last",
+    "the `/hooks` approval of the hooks the installer writes and the door opening a closed app were not seen on screen",
+    "`hors_enclos: true`", "There is no door to the iPhone app.",
+    "A Codex chair whose door is `app` gets the desktop app opened on its thread when a letter rings while the app is closed, even if the session is a terminal one"
   ]) {
     assert.ok(limites.includes(fait), `Known limitations : ${fait}`);
   }
-  // Les plists launchd ne portent ni la déclaration des maisons ni la maison
-  // désignée : l'oracle est le gabarit. Le jour où l'installeur les reporte,
-  // cette garde rougit et la limite doit changer avec lui.
+  // Les plists launchd épinglent la déclaration des maisons (1.1.0, Tâche 2),
+  // jamais la maison désignée : l'oracle est le gabarit, et le rendu par
+  // défaut de l'installeur. Le jour où l'un ou l'autre change, cette garde
+  // rougit et la limite doit changer avec lui.
   for (const gabarit of ["scripts/launchd/com.valxos.messenger.facteur.plist", "scripts/launchd/com.valxos.messenger.web.plist"]) {
     const plist = read(gabarit);
     assert.match(plist, /<key>EnvironmentVariables<\/key>/, `sonde impossible : ${gabarit} n'a plus de bloc d'environnement`);
-    for (const clef of ["VALXOS_MAISONS", "CC2CC_MAISONS", "CLAUDE_CONFIG_DIR"]) assert.ok(!plist.includes(clef), `${gabarit} porte ${clef} : la limite launchd du README est fausse`);
+    assert.match(plist, /<key>VALXOS_MAISONS<\/key>\s*<string>__VALXOS_MAISONS__<\/string>/, `${gabarit} n'épingle plus les maisons : la limite launchd du README est fausse`);
+    for (const clef of ["CC2CC_MAISONS", "CLAUDE_CONFIG_DIR"]) assert.ok(!plist.includes(clef), `${gabarit} porte ${clef} : la limite launchd du README est fausse`);
   }
+  assert.match(read("scripts/launchd/plists.js"), /return maisons \|\| path\.join\(home, "\.claude"\);/, "sonde : sans déclaration, le plist vaut <home>/.claude, comme le disent les README");
   for (const [fichier, phrase] of [
-    ["README.md", "The plists carry no `VALXOS_MAISONS` and no `CLAUDE_CONFIG_DIR`: under launchd the Facteur scans `~/.claude` only, and the web door's `attente` advice on a send uses that same list"],
-    ["README.fr.md", "Les plists ne portent ni `VALXOS_MAISONS` ni `CLAUDE_CONFIG_DIR` : sous launchd, le Facteur ne parcourt que `~/.claude`, et l'avis `attente` de la porte web sur un envoi utilise la même liste"]
+    ["README.md", "Both plists pin `VALXOS_MAISONS`: the declaration the installer runs with, as written, else your `~/.claude` path. They carry no `CLAUDE_CONFIG_DIR`: under launchd the Facteur scans that list only, and the web door's `attente` advice on a send uses that same list"],
+    ["README.fr.md", "Les deux plists épinglent `VALXOS_MAISONS` : la déclaration avec laquelle l'installeur tourne, telle qu'écrite, sinon le chemin de votre `~/.claude`. Ils ne portent pas `CLAUDE_CONFIG_DIR` : sous launchd, le Facteur ne parcourt que cette liste, et l'avis `attente` de la porte web sur un envoi utilise la même liste"]
   ]) assert.ok(read(fichier).replace(/\s+/g, " ").includes(phrase), `${fichier} : l'installation launchd le dit aussi`);
   assert.doesNotMatch(read("README.md"), /not measured in this release/, "R7 est prouvé : plus de « not measured »");
   assert.doesNotMatch(read("README.fr.md"), /n'a pas été mesuré dans cette release/, "R7 est prouvé : plus de « pas mesuré »");
-  // Le code d'attente cité est celui que le guichet rend vraiment.
+  // Les codes cités sont ceux que le guichet et la tournée rendent vraiment :
+  // `lignee-ambigue` est un `attente.motif` du guichet ; `sonnette-codex-impossible`
+  // est une raison de TOURNÉE, que `envoi_status` lit dans la dernière tentative.
   assert.ok(limites.includes('"lignee-ambigue"') && read("src/lib/registry.js").includes('motif: "lignee-ambigue"'), "le code de la lettre tenue vient du code");
+  assert.match(read("src/facteur/porte-codex-regles.js"), /export const MOTIF_SONNETTE_IMPOSSIBLE = "sonnette-codex-impossible";/, "la raison de tournée vient du code");
+  assert.match(serveur, /tournee: tourneeDe\(row\.msg_id\)/, "et envoi_status la rend dans `tournee`");
+  assert.doesNotMatch(limites, /attente\.motif: "sonnette-codex-impossible"/, "sonnette-codex-impossible n'est jamais un attente.motif");
+  // « What it is not » : la poussée hors session et les hooks, bornés aux deux harnais.
+  const pas = section(read("README.md"), "What it is not").replace(/\s+/g, " ");
+  assert.ok(pas.includes("the monitor is Claude Code-specific, the hooks exist for Claude Code and Codex only"), "What it is not : les hooks, Claude Code et Codex");
   const fr = section(read("README.fr.md"), "Limites connues").replace(/\s+/g, " ");
-  for (const fait of ["MCP_PROTOCOL_NEGOTIATION=legacy", "_meta['anthropic/alwaysLoad']", "npm pack --ignore-scripts", "2.1.292", "2.1.275", "2.1.271", "valxos-chaise moissonner", '"lignee-ambigue"', "ne portent ni `VALXOS_MAISONS` ni `CLAUDE_CONFIG_DIR`",
-    "le moniteur du plugin est resté armé pendant toute la session de 40 minutes", "ajoutez la variable à l'environnement des deux plists avant de les charger",
-    "et l'avis `attente` de la porte web sur un envoi utilise la même liste"]) {
+  for (const fait of ["MCP_PROTOCOL_NEGOTIATION=legacy", "_meta['anthropic/alwaysLoad']", `les ${MOTS_FR[enregistres - toujours]} autres`, "`reply`", "npm pack --ignore-scripts", "2.1.292", "2.1.275", "2.1.271", "valxos-chaise moissonner", '"lignee-ambigue"', "ne portent pas `CLAUDE_CONFIG_DIR`, et leur `VALXOS_MAISONS` est le chemin de votre `~/.claude`",
+    "le moniteur du plugin est resté armé pendant toute la session de 40 minutes", "relancez l'installeur avec la liste complète dans `VALXOS_MAISONS`",
+    "et l'avis `attente` de la porte web sur un envoi utilise la même liste",
+    "La sonnette Codex sonne une fois par lettre", "L'enclos n'est pas une frontière de sécurité", '`envoi_status` montre `tournee.reason: "sonnette-codex-impossible"`',
+    "Il n'y a pas de porte vers l'app iPhone.",
+    "Une chaise Codex dont la porte est `app` voit l'app de bureau s'ouvrir sur son fil quand une lettre sonne alors que l'app est fermée, même si la session est un terminal"]) {
     assert.ok(fr.includes(fait), `Limites connues : ${fait}`);
   }
+  assert.doesNotMatch(fr, /attente\.motif: "sonnette-codex-impossible"/, "en français non plus");
 });
 
 // Une doc est française quand ses diacritiques le disent (plus de 5 pour
@@ -385,6 +500,16 @@ test("README — les maisons par défaut, l'opérateur d'exemple, le glossaire d
     ["README.fr.md", "mettez le chemin de votre `~/.claude` dans la déclaration si vous voulez encore que cette maison soit parcourue"],
     ["README.fr.md", "incluez le chemin de votre `CLAUDE_CONFIG_DIR` si vous voulez encore qu'il soit parcouru"],
     ["docs/MCP_CLIENTS.md", "neither `~` nor `$HOME` is expanded"]
+  ]) assert.ok(read(fichier).replace(/\s+/g, " ").includes(fait), `${fichier} : ${fait}`);
+  // LES RUES (1.1.0, Tâche 2) : le code développe une entrée `…/*`, et elle
+  // seule ; les deux README et la doc des clients le disent.
+  assert.ok(corpsMaisons.includes('endsWith("/*")'), "sonde impossible : maisonsConnues ne développe plus les rues");
+  for (const [fichier, fait] of [
+    ["README.md", "An entry that ends in `/*` is a street of houses: every directory directly under that path is a house"],
+    ["README.md", "The street is read again at each round, so a house created after the Facteur started is scanned without a restart"],
+    ["README.fr.md", "Une entrée qui finit par `/*` est une rue de maisons : chaque dossier directement sous ce chemin est une maison"],
+    ["README.fr.md", "La rue est relue à chaque tournée"],
+    ["docs/MCP_CLIENTS.md", "an entry ending in `/*` stands for every directory directly under that path, read again at each round"]
   ]) assert.ok(read(fichier).replace(/\s+/g, " ").includes(fait), `${fichier} : ${fait}`);
   for (const fichier of ["README.md", "README.fr.md", "docs/MCP_CLIENTS.md"]) {
     assert.ok(!read(fichier).includes("`$HOME/.claude`, "), `${fichier} : « $HOME/.claude » se lit comme une valeur à taper — elle n'est pas développée`);
@@ -702,4 +827,241 @@ test("README — `valxos-inbox` montre au plus 20 lettres non accusées, et --li
   }));
   assert.equal(relever().count, 20, "par défaut, vingt lettres sur vingt-deux");
   assert.equal(relever("--limit", "3").count, 3, "--limit N change la borne");
+});
+
+// 1.1.0 (22/10/2026) — LES TABLES ET LA SONNETTE CODEX : la vitrine dit ce que
+// le code fait, et chaque phrase a son oracle dans l'arbre — le serveur MCP
+// (reply, les codes), les deux binaires neufs, le format des en-têtes, la
+// règle du réveil, la porte Codex du Facteur, le hook et son gabarit,
+// l'installeur. Les phrases sont épinglées en anglais et en français ; le code
+// ne l'est qu'une fois. `sonnette-codex-impossible` est une raison de TOURNÉE
+// (la dernière tentative, que `envoi_status` rend dans `tournee`), jamais un
+// `attente.motif` : la vitrine ne la range jamais parmi les codes d'attente.
+test("README — « Tables » et « Doorbell for Codex » (en et fr) : les phrases, et leurs oracles dans le code", async () => {
+  const serveur = read("src/mcp-server/server.js");
+  assert.match(serveur, /server\.registerTool\(\s*"reply"/, "sonde : reply est un outil du serveur");
+  for (const code of ['refus: "hors-enclos"', 'refus: "table-fermee"', 'refus: "pas-expediteur"']) assert.ok(serveur.includes(code), `sonde : le serveur rend ${code}`);
+  assert.match(read("src/bin/valxos-table.js"), /valxos-table enclos <sender> <name>/, "sonde : l'enclos est un geste de valxos-table");
+  assert.match(read("src/bin/valxos-history.js"), /--envoi <id>/, "sonde : valxos-history exporte un envoi");
+  const { ligneDeTable } = await import("../src/lib/format.js");
+  assert.equal(ligneDeTable({ nom: "film", mode: "direct", position: "seen up to 1:25:00" }), 'Table: film (direct) · position: "seen up to 1:25:00"', "sonde : la ligne de table cite la position en JSON");
+  assert.match(read("src/lib/format.js"), /Reminder: \$\{/, "sonde : l'en-tête porte Reminder: <n>");
+  const { deciderLeReveil } = await import("../src/lib/guichet.js");
+  assert.equal(deciderLeReveil({ priority: "high", tableReveil: "prochain-tour" }).sansReveil, false, "sonde : high réveille toujours");
+  assert.equal(deciderLeReveil({ priority: "low", tableReveil: "reveil", mentionne: true }).sansReveil, true, "sonde : low ne réveille jamais, mention comprise");
+  assert.equal(deciderLeReveil({ priority: "normal", tableReveil: "prochain-tour", mentionne: true }).sansReveil, false, "sonde : la mention réveille");
+  assert.equal(deciderLeReveil({ priority: "normal", tableReveil: "reveil", reaction: true, modeTable: "direct" }).sansReveil, true, "sonde : la réaction en mode direct est calme");
+  assert.equal(deciderLeReveil({ priority: "normal", tableReveil: "reveil", membreReveil: "prochain-tour" }).sansReveil, true, "sonde : la règle du membre avant celle de la table");
+  const { fenetreDeReService } = await import("../src/lib/database.js");
+  assert.deepEqual([0, 1, 2, 3, 4].map((n) => fenetreDeReService(n) / 60000), [10, 20, 40, 60, 60], "sonde : les rappels s'espacent 10, 20, 40, puis 60 minutes");
+  const { argumentsDeSonnette, lienDuFil, MOTIF_SONNETTE_IMPOSSIBLE, BUNDLE_APP_CODEX } = await import("../src/facteur/porte-codex-regles.js");
+  assert.equal(argumentsDeSonnette({ thread_id: "t" }, "e")[0], "queue", "sonde : la sonnette est codex queue");
+  assert.equal(lienDuFil("u"), "codex://threads/u", "sonde : la porte ouvre l'app sur le fil");
+  assert.equal(MOTIF_SONNETTE_IMPOSSIBLE, "sonnette-codex-impossible", "sonde : la raison de tournée");
+  assert.equal(BUNDLE_APP_CODEX, "com.openai.codex", "sonde : l'app se cherche par son identifiant de paquet");
+  const { porteDeLEnvironnement } = await import("../src/lib/chaise-codex.js");
+  assert.equal(porteDeLEnvironnement({}), "app", "sonde : sans VALXOS_CODEX_PORTE, la porte est app");
+  assert.equal(porteDeLEnvironnement({ VALXOS_CODEX_PORTE: "cli" }), "cli", "sonde : un lanceur de terminal pose cli");
+  const { BUDGET_CARACTERES } = await import("../src/hooks/codex/harness-common.js");
+  assert.equal(BUDGET_CARACTERES, 8000, "sonde : le hook Codex injecte 8 000 caractères au plus");
+  const { LONGUEUR_SUJET_SONNETTE } = await import("../src/lib/sonnette.js");
+  assert.equal(LONGUEUR_SUJET_SONNETTE, 60, "sonde : l'objet de l'enveloppe est coupé à 60");
+  assert.ok(exists("src/hooks/codex/codex-hook.js") && exists("scripts/codex/hooks.template.json"), "sonde : le hook Codex et son gabarit existent");
+  assert.match(read("scripts/install.js"), /--codex/, "sonde : l'installeur connaît --codex");
+  assert.match(read("src/facteur/porte-codex.js"), /exec resume/, "sonde : la porte dit qu'elle ne lance jamais codex exec resume");
+  assert.doesNotMatch(read("src/facteur/porte-codex.js").replace(/^\s*\/\/.*$/gm, ""), /"resume"/, "sonde : et aucun argument resume n'est lancé");
+
+  const tables = plat(section(read("README.md"), "Tables"));
+  for (const phrase of [
+    "A **table** is an address book, not a mailbox",
+    "posts **one letter per member**, the sender excluded under every name it goes by",
+    "`high` and `critical` always wake; `low` never does.",
+    "`reveiller: [\"<member>\", ...]` on `send` or `reply` wakes the members it names (except at `low` priority).",
+    "A reply in a `direct` table is a quiet reaction: nobody is woken; the next beat wakes.",
+    "`prochain-tour` (next turn)",
+    "A quiet letter is not carried by the Facteur and never holds a stop",
+    "its letters never give a cc copy to another chair of a member's lineage (`sans_copie`)",
+    "`refus: \"hors-enclos\"`",
+    "`hors_enclos: true` (`--hors-enclos` on `valxos-send`)",
+    "(`table-sous-enclos`)",
+    "The enclosure is a seatbelt for a sender who asked for it, not a boundary",
+    "never \"read\": only the acknowledgement means seen and handled",
+    "(`tournee: { state, reason, at }`)",
+    "In letter lines (`inbox`, `history`, `valxos-inbox`), `table` is the table's name; in a send's answer it is the table itself.",
+    "`Table: <name> (<mode>) · position: \"<text>\"`",
+    "The position is 120 characters at most (code points)",
+    "`valxos-history --thread <id> | --table <name> | --envoi <id>`",
+    "markdown folds the letters of one table send into one entry, and its count line counts entries",
+    "`Reminder: <n>`",
+    "where 1.0.0 brought an unacknowledged letter back every 10 minutes, 1.1.0 brings it back after 10, 20, 40, then every 60 minutes",
+    "in the hooks' and the monitor's header",
+    "`From: alice (atelier)`",
+    "`alice#<prefix>`",
+    "(`attente.motif: \"chaise-ambigue\"`)",
+    "`envoi_status`", "`reply`", "`table_manage`", "`tables`"
+  ]) assert.ok(tables.includes(phrase), `README.md, Tables : ${phrase}`);
+  // La 1.0.0 re-servait une lettre non accusée toutes les dix minutes (la base
+  // de ce run : DEFAULT_REDELIVER_AFTER_MS, `delivered_at` ré-estampillé), jamais « après
+  // chaque appel d'outil » (revue de la Tâche 12, finding 2).
+  for (const fichier of ["README.md", "README.fr.md", "CHANGELOG.md"]) {
+    assert.doesNotMatch(plat(read(fichier)), /after every tool call|après chaque appel d'outil\)? ?au lieu|au lieu de revenir après chaque appel d'outil/, `${fichier} : la 1.0.0 ne revenait pas après chaque appel d'outil`);
+  }
+  const sonnette = plat(section(read("README.md"), "Doorbell for Codex"));
+  for (const phrase of [
+    "`src/hooks/codex/codex-hook.js`",
+    "`--serves <name>`; a hook whose identity is not served answers `{}` and opens no office",
+    "(8,000 characters at most, its preamble included), marks them delivered and never acknowledges them",
+    "`<office>/codex/<lineage>.json`",
+    "`src/facteur/porte-codex.js`",
+    "`codex queue --thread <thread id> --message <envelope>`",
+    "subject cut at 60 characters",
+    "**never a letter body**: a queued message reaches the model as the user's own words",
+    "`lsappinfo find bundleid=com.openai.codex`",
+    "`open codex://threads/<uuid>`",
+    "once per letter, and only for a chair whose door is `app`",
+    "unset means `app` (the desktop app has no launcher), and a terminal launcher should export `VALXOS_CODEX_PORTE=cli`",
+    "`VALXOS_CODEX_OUVRIR_APP=0`",
+    "It never runs `codex exec resume`",
+    "`valxos-messenger install --codex --self <name>`",
+    "`[mcp_servers.valxos_messenger]`",
+    "a conflict writes nothing",
+    "`/hooks`",
+    "after **Escape** in the Codex TUI the queue freezes until the next prompt typed by a human",
+    "Before a session's first turn `codex queue` cannot reach it (`no rollout found`)",
+    "five seconds per attempt, with one retry",
+    "`envoi_status` shows the round's reason, `sonnette-codex-impossible`",
+    "There is no door to the iPhone app."
+  ]) assert.ok(sonnette.includes(phrase), `README.md, Doorbell for Codex : ${phrase}`);
+  assert.doesNotMatch(sonnette, /attente\.motif: "sonnette-codex-impossible"/, "Doorbell for Codex : jamais un attente.motif");
+  const porteWeb = plat(section(read("README.md"), "The web door"));
+  for (const phrase of ["`a: \"table:<name>\"`", "`403 hors-enclos`", "`404 table-inconnue`", "`403 pas-membre`", "`400 nom-de-table-invalide`", "`hors_enclos: true` (a JSON boolean)", "`interrompu: true`", "`table_mode`", "`chaise_nom`", "`rappel`", "the page's composer does not offer a table in this release"]) {
+    assert.ok(porteWeb.includes(phrase), `README.md, The web door : ${phrase}`);
+  }
+  const web = read("src/web/serveur.js");
+  for (const code of ["hors-enclos", "table-inconnue", "pas-membre", "nom-de-table-invalide", "envoi-interrompu"]) assert.ok(web.includes(`"${code}"`), `sonde : la porte web rend ${code}`);
+  assert.ok(plat(section(read("README.md"), "Harness support")).includes("The monitor is Claude Code-specific; hooks exist for Claude Code and, since 1.1.0, for Codex."), "Harness support : la phrase de parité");
+
+  const frTables = plat(section(read("README.fr.md"), "Les tables"));
+  for (const phrase of [
+    "Une **table** est un carnet d'adresses, pas une boîte aux lettres", "dépose **une lettre par membre**",
+    "`high` et `critical` réveillent toujours ; `low` jamais.", "(sauf en priorité `low`)", "`prochain-tour`", "`refus: \"hors-enclos\"`",
+    "(`table-sous-enclos`)", "`sans_copie`", "jamais « lu » : seul l'accusé veut dire vu et traité",
+    "`Table: <nom> (<mode>) · position: \"<texte>\"`", "120 caractères au plus (points de code)",
+    "`valxos-table`", "`valxos-history --thread <id> | --table <nom> | --envoi <id>`", "`reply`", "`envoi_status`", "`Reminder: <n>`", "là où la 1.0.0 ramenait une lettre non accusée toutes les 10 minutes, la 1.1.0 la ramène après 10, 20, 40, puis toutes les 60 minutes", "dans l'en-tête des hooks et du moniteur",
+    "`From: alice (atelier)`", "`alice#<préfixe>`", "(`attente.motif: \"chaise-ambigue\"`)"
+  ]) assert.ok(frTables.includes(phrase), `README.fr.md, Les tables : ${phrase}`);
+  const frSonnette = plat(section(read("README.fr.md"), "La sonnette Codex"));
+  for (const phrase of [
+    "`codex queue`", "jamais un corps de lettre", "un message mis en file arrive au modèle comme une parole de l'utilisateur",
+    "`open codex://threads/<uuid>`", "une fois par lettre, et seulement pour une chaise dont la porte est `app`", "`VALXOS_CODEX_PORTE=cli`",
+    "`VALXOS_CODEX_OUVRIR_APP=0`", "Le Facteur ne lance jamais `codex exec resume`.",
+    "`valxos-messenger install --codex --self <nom>`", "`/hooks`", "après **Échap**", "Avant le premier tour d'une session, `codex queue` ne l'atteint pas (`no rollout found`)",
+    "`envoi_status` montre la raison de la tournée, `sonnette-codex-impossible`", "Il n'y a pas de porte vers l'app iPhone."
+  ]) assert.ok(frSonnette.includes(phrase), `README.fr.md, La sonnette Codex : ${phrase}`);
+  assert.doesNotMatch(frSonnette, /attente\.motif: "sonnette-codex-impossible"/, "La sonnette Codex : jamais un attente.motif");
+  const frPorte = plat(section(read("README.fr.md"), "La porte web"));
+  for (const phrase of ["`a: \"table:<nom>\"`", "`403 hors-enclos`", "`404 table-inconnue`", "`hors_enclos: true`", "`interrompu: true`", "`chaise_nom`", "le composeur de la page ne propose pas de table dans cette version"]) {
+    assert.ok(frPorte.includes(phrase), `README.fr.md, La porte web : ${phrase}`);
+  }
+});
+
+// 1.1.0 — docs/FACTEUR.md (en français) décrit la lettre calme et la porte
+// Codex de la tournée : chaque raison qu'il cite est une constante de la porte,
+// la clef `calme` est celle que le journal écrit, et le réglage d'ouverture de
+// l'app est lu par la config sous le nom que la table des réglages donne.
+test("docs/FACTEUR.md — la lettre calme et la porte Codex : les raisons, la clef du journal, le réglage, tels que le code les écrit", async () => {
+  const facteur = plat(read("docs/FACTEUR.md"));
+  const regles = await import("../src/facteur/porte-codex-regles.js");
+  for (const raison of [regles.MOTIF_SONNETTE_IMPOSSIBLE, regles.MOTIF_SONNETTE_DEJA_SONNEE, regles.MOTIF_SONNETTE_DIFFEREE, regles.PORTE_CODEX_ABSENTE]) {
+    assert.ok(facteur.includes(`\`${raison}\``), `FACTEUR.md nomme la raison \`${raison}\``);
+  }
+  const porte = read("src/facteur/porte-codex.js");
+  for (const detail of ["codex-introuvable", "codex-injoignable", "codex-delai", "codex-refus", "codex-fil-sans-session"]) {
+    assert.ok(porte.includes(`"${detail}"`), `sonde : la porte rend ${detail}`);
+    assert.ok(facteur.includes(`\`${detail}\``), `FACTEUR.md nomme le détail \`${detail}\``);
+  }
+  const tournee = read("src/facteur/round.js");
+  for (const etat of ["sonnee-codex", "sonnee-codex-app-ouverte"]) {
+    assert.ok(tournee.includes(`"${etat}"`), `sonde : la tournée compte ${etat}`);
+    assert.ok(facteur.includes(`\`${etat}\``), `FACTEUR.md nomme ${etat}`);
+  }
+  assert.ok(tournee.includes("{ calme: true }") && facteur.includes("`calme: true`"), "la lettre calme non prise se dit `calme: true`, au journal comme à la doc");
+  assert.ok(facteur.includes("ACCUSÉE, RÉSERVÉE, DIFFÉRÉE, ou PRÊTE"), "le mode une-lettre nomme PRÊTE");
+  assert.match(read("src/lib/config.js"), /valeurDeLEnvironnement\(env, "CC2CC_CODEX_OUVRIR_APP"\)/, "sonde : la config lit le réglage d'ouverture");
+  assert.ok(facteur.includes("| `VALXOS_CODEX_OUVRIR_APP` (`CC2CC_CODEX_OUVRIR_APP`) |"), "la table des réglages porte VALXOS_CODEX_OUVRIR_APP");
+  assert.ok(facteur.includes("jamais un corps"), "FACTEUR.md dit que l'enveloppe ne porte jamais un corps");
+  assert.match(porte, /process\.kill\(-/, "sonde : le couperet tue le GROUPE de l'enfant");
+  assert.ok(facteur.includes("le groupe de processus de l'enfant est tué ; un petit-fils qui a quitté ce groupe (`setsid`) lui survit"), "FACTEUR.md dit la limite du couperet");
+  assert.ok(!facteur.includes("ses petits-enfants sont tués"), "plus de promesse sur tous les petits-enfants");
+  for (const detail of ["fiche-incomplete", "open-impossible", "open-delai", "run-inaccessible"]) {
+    assert.ok(porte.includes(`"${detail}"`) && facteur.includes(`\`${detail}\``), `FACTEUR.md nomme aussi ${detail}`);
+  }
+  // m3 (re-revue du round FINAL) : la règle d'A4, comme README et MCP_CLIENTS ; et S11.
+  assert.ok(facteur.includes("Le droit d'ouvrir se juge par lettre neuve"), "FACTEUR.md dit la règle d'A4");
+  assert.ok(facteur.includes("peut être couverte de nouveau par l'ouverture d'une neuve"), "FACTEUR.md dit qu'une ancienne lettre peut être couverte de nouveau");
+  assert.ok(facteur.includes("sur les lettres qui y avaient droit, une fois chacune"), "FACTEUR.md dit une tentative par lettre (S11)");
+  assert.ok(!facteur.includes("L'ouverture tentée se note sur la lettre\n"), "l'ancienne phrase");
+});
+
+// ── LA FIN DE LA 1.1.0 : CE QUE LES DOCS DISENT, EXACTEMENT ───────────────────
+// B4 (passe adverse) : « refusé avant toute écriture » était absolu ; la garantie prouvée est
+// « aucune lettre écrite » — la carte de pair de l'appelant peut être inscrite avant le refus.
+// B16 (marche Codex) : « low never wakes » se lit comme une règle générale ; elle ne vaut que pour
+// une lettre de TABLE. Une lettre directe `low` est portée et sonnée comme en 1.0.0 — chez Codex,
+// une sonnerie démarre un tour — et seul le filet du Stop l'ignore.
+// B15 (relecture) : la fiche d'une lignée Codex est celle de la DERNIÈRE session qui l'écrit
+// (`tenirLaFiche` : SessionStart, et un prompt ou un Stop dont le fil n'est pas celui de la fiche).
+// B11 (parqué T12) : la page promettait « exactly one of two statuses » et en portait un
+// troisième (« Not yet seen live ») pour la sonnette Codex. Depuis la marche du 22/10/2026 sur un
+// Codex jetable (le hook livré, la porte et l'installeur ont tourné en direct), la sous-section
+// porte le premier statut, daté, et le troisième n'existe plus : deux statuts, comme la page le dit.
+test("1.1.0 — les docs disent la portée exacte : aucune LETTRE écrite au refus de l'enclos (la carte du pair peut l'être), la règle low d'une lettre de table, la fiche de la dernière session, deux statuts et la sonnette vue en direct", () => {
+  const readme = plat(read("README.md"));
+  const readmeFr = plat(read("README.fr.md"));
+  const changelog = plat(read("CHANGELOG.md"));
+  const clients = plat(read("docs/MCP_CLIENTS.md"));
+  const presents = [
+    [readme, "README.md", "is refused before any letter is written (the sender's peer card may already be recorded by then"],
+    [changelog, "CHANGELOG.md", "is refused before any letter is written (the sender's peer card may already be recorded by then"],
+    [clients, "docs/MCP_CLIENTS.md", "is refused before any letter is written (the caller's peer card may already be recorded by then)"],
+    [readmeFr, "README.fr.md", "est refusée avant qu'aucune lettre ne soit écrite (la carte de pair de l'expéditeur a pu être inscrite avant"],
+    [readme, "README.md", "These are the rules of a table letter. A direct letter is carried and rung as in 1.0.0 whatever its priority, `low` included (on a Codex chair a ring starts a turn); only the Stop safety net never holds a stop for a `low` letter."],
+    [changelog, "CHANGELOG.md", "A direct letter is carried and rung as in 1.0.0 whatever its priority, `low` included; only the Stop safety net ignores a `low` letter."],
+    [clients, "docs/MCP_CLIENTS.md", "A direct letter is rung whatever its priority, `low` included, as in 1.0.0: the quiet rules (`sans_reveil`) are a table letter's"],
+    [readmeFr, "README.fr.md", "Ce sont les règles d'une lettre de table. Une lettre directe est portée et sonnée comme en 1.0.0 quelle que soit sa priorité, `low` comprise"],
+    [readme, "README.md", "ring the session that wrote the card last"],
+    [changelog, "CHANGELOG.md", "ring the session that wrote the card last"],
+    [clients, "docs/MCP_CLIENTS.md", "ring the session that wrote the card last"],
+    // m2 (re-revue du round FINAL) : la phrase française suit la même règle.
+    [readmeFr, "README.fr.md", "sonnent la dernière session qui a écrit la fiche (son `SessionStart`, ou un prompt ou un `Stop` d'une session dont la fiche ne nomme pas le fil)"],
+    [clients, "docs/MCP_CLIENTS.md", "Every client section carries exactly one of two statuses, and nothing in between"],
+    [clients, "docs/MCP_CLIENTS.md", "**Verified on macOS on 2026-10-22 with codex-cli 0.163.0**"],
+    [readme, "README.md", "**Seen live on 22/10/2026 with codex-cli 0.163.0**"],
+    [changelog, "CHANGELOG.md", "were seen live once, on 2026-10-22"]
+  ];
+  for (const [texte, fichier, phrase] of presents) assert.ok(texte.includes(phrase), `${fichier} : ${phrase}`);
+  for (const [texte, fichier] of [[readme, "README.md"], [changelog, "CHANGELOG.md"], [clients, "docs/MCP_CLIENTS.md"]]) {
+    assert.ok(!texte.includes("ring the one whose `SessionStart` ran last"), `${fichier} : l'ancienne règle de la fiche`);
+    assert.ok(!readmeFr.includes("celle dont le `SessionStart` a tourné en dernier"), "README.fr.md : l'ancienne règle de la fiche");
+    assert.ok(!/outside (?:the table|its closed table) is refused before anything is written/.test(texte), `${fichier} : l'ancienne promesse absolue`);
+  }
+  for (const [texte, fichier] of [[readme, "README.md"], [readmeFr, "README.fr.md"], [changelog, "CHANGELOG.md"], [clients, "docs/MCP_CLIENTS.md"]]) {
+    assert.ok(!/not yet seen live|pas encore vu en direct|third status/i.test(texte), `${fichier} : le troisième statut n'existe plus`);
+  }
+  assert.match(read("src/bin/valxos-table.js"), /In a table, priority high and critical\s+always wake; low never does/, "l'aide de valxos-table dit que la règle est celle d'une table");
+});
+
+// B12 (revue finale M-2, M-3) — DEUX LIMITES QUI SE DISENT. Une table fermée se cache, pas son
+// existence : les codes de refus la trahissent à un non-membre (SECURITY.md). Et un expéditeur NU
+// (la CLI, un client sans chaise) inscrit dans une table sous sa lignée ET sous une de ses chaises
+// reçoit sa propre lettre à cette chaise : le guichet ne devine pas la chaise d'un nom nu.
+test("B12 — SECURITY.md dit que l'existence d'une table fermée se devine ; le CHANGELOG, qu'un expéditeur nu reçoit sa lettre à sa chaise inscrite", () => {
+  assert.ok(
+    plat(read("SECURITY.md")).includes("A closed table hides its letters, its position and itself from non-members, but not its existence: the refusal codes (`pas-membre` or `table-fermee` against `table-inconnue`) tell a non-member that a closed table of that name exists."),
+    "SECURITY.md : l'existence d'une table fermée"
+  );
+  assert.ok(
+    plat(section(read("CHANGELOG.md"), "[1.1.0] — 2026-11-25")).includes("A bare sender (the CLI, or an MCP client without a chair) listed in a table under its lineage and under one of its chairs receives its own letter at that chair: the counter does not guess which chair a bare name is."),
+    "CHANGELOG : l'expéditeur nu et sa chaise inscrite"
+  );
 });

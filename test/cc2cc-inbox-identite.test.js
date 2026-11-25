@@ -308,3 +308,46 @@ for (const drapeau of ["--help", "-h"]) {
     assert.match(aide.stdout, /acknowledge one letter/);
   });
 }
+
+// S10 (seconde passe adverse) — la CLI dérive comme le serveur MCP : la valeur BRUTE, comme la 1.0.0
+// (`alice opus` relève la lettre d'une base 1.0.0), et une partie de plus de 64 caractères ou une
+// lignée vide refuse le démarrage (`identite-invalide`, sortie 2, une phrase), avant tout bureau.
+test("S10 — valxos-inbox sous CC2CC_SELF='alice opus' relève sa lettre 1.0.0 ; 65 caractères ou #foo : valxos-inbox, valxos-send, valxos-table et valxos-history refusent (identite-invalide, sortie 2), rien d'écrit", (t) => {
+  const root = maisonJetable();
+  const db = openDatabase({ file: path.join(root, "broker.db") });
+  insertMessage(db, { msg_id: "s10-cli", sender: "bob", recipient: "alice opus", body: "a 1.0.0 letter" });
+  db.close();
+  const sortie = lancerInbox(root, { CC2CC_SELF: "alice opus" }, ["--mark-delivered", "false"]);
+  assert.equal(sortie.status, 0, sortie.stderr);
+  const lu = JSON.parse(sortie.stdout);
+  assert.equal(lu.self, "alice opus");
+  assert.deepEqual(lu.messages.map((m) => m.msg_id), ["s10-cli"]);
+
+  const lancer = (bin, env, args) => spawnSync(process.execPath, [path.join(repo, "src/bin", bin), ...args], {
+    encoding: "utf8",
+    env: { ...envPropre(), CC2CC_V2_HOME: root, CC2CC_GARDE_BUREAU: "1", ...env }
+  });
+  const compter = () => {
+    const base = openDatabase({ file: path.join(root, "broker.db") });
+    try {
+      return base.prepare("SELECT count(*) AS n FROM messages").get().n;
+    } finally {
+      base.close();
+    }
+  };
+  for (const [nom, motif] of [["a".repeat(65), /65 characters long; 64 at most/], ["#foo", /lineage is empty/]]) {
+    for (const [bin, args] of [
+      ["valxos-inbox.js", ["--mark-delivered", "false"]],
+      ["valxos-send.js", ["--to", "bob", "--body", "x"]],
+      ["valxos-table.js", ["creer", "s10-test"]],
+      ["valxos-history.js", ["--thread", "fil-s10"]]
+    ]) {
+      const r = lancer(bin, { CC2CC_SELF: nom }, args);
+      assert.equal(r.status, 2, `${bin} ${nom.slice(0, 10)} : ${r.stdout}\n${r.stderr}`);
+      assert.match(r.stderr, /refusing to start: .*\(identite-invalide\)\. Nothing was done\./, bin);
+      assert.match(r.stderr, motif, bin);
+      assert.doesNotMatch(r.stderr, /\n\s+at /, `${bin} : une phrase, jamais une pile`);
+    }
+  }
+  assert.equal(compter(), 1, "rien d'écrit");
+});

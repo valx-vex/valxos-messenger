@@ -214,6 +214,14 @@ export function normaliserLettre(brut = {}) {
     // Le cri (H2) voyage AVEC la lettre. La forme à clefs fixes le jetait —
     // tout un chantier rendu par l'API et perdu à un caractère de la fin.
     en_souffrance: brut.en_souffrance ?? null,
+    // LA TABLE (1.1.0) : le nom (`table`), le mode et la position COURANTS de
+    // la table, tels que l'API les lit en base. La page dessine une ligne avec
+    // les trois, et rien d'autre : le nom de chaise et le rappel que l'API rend
+    // aussi attendent leur place à l'écran. Absente, la clef vaut nul — jamais
+    // une table devinée.
+    table: brut.table ?? null,
+    table_mode: brut.table_mode ?? null,
+    position: brut.position ?? null,
   };
 }
 
@@ -611,6 +619,28 @@ function corpsEnParagraphes(corps) {
     .join("");
 }
 
+// LA LIGNE DE TABLE (1.1.0) — la MÊME que `ligneDeTable` (src/lib/format.js),
+// que les hooks et `valxos-inbox` écrivent : `Table: <nom> (<mode>)`, puis
+// ` · position: "<texte>"` quand la table en porte une. La page ne peut pas
+// importer format.js (elle vit dans un navigateur) : elle reproduit la forme,
+// et test/web-tables.test.js tient les deux côte à côte pour qu'elles ne
+// divergent jamais en silence. La position est du texte posé par un membre
+// (non fiable, SECURITY.md) : bornée à 120 points de code (la borne du carnet,
+// `LONGUEUR_POSITION` — un emoji n'est pas coupé en deux), citée comme un
+// littéral JSON (ses retours à la ligne deviennent `\n`), puis échappée au
+// dessin comme le corps — jamais du HTML. Sans table connue (pas de mode), pas
+// de ligne : les hooks n'en posent pas non plus.
+const LONGUEUR_POSITION = 120;
+
+export function ligneDeTableDuPli(l) {
+  const nom = String(l?.table ?? "");
+  const mode = String(l?.table_mode ?? "");
+  if (!nom || !mode) return "";
+  const brute = l.position === null || l.position === undefined ? "" : String(l.position);
+  const position = brute.trim() ? JSON.stringify([...brute].slice(0, LONGUEUR_POSITION).join("")) : "";
+  return `Table: ${nom} (${mode})${position ? ` · position: ${position}` : ""}`;
+}
+
 // LE PLI EST UNE CHAÎNE AVANT D'ÊTRE UN ÉLÉMENT. Le dessin est séparé de la
 // pose pour qu'un test puisse le LIRE sans navigateur : ce qui s'affiche est
 // alors une chose qu'on prouve, pas une chose qu'on croit.
@@ -620,6 +650,9 @@ export function dessinerPli(l, local) {
   // Elle est ORTHOGONALE au cachet (une lettre « reçue » peut être en
   // souffrance) — d'où deux marques, jamais un cinquième état.
   const cri = criDeLaLettre(l);
+  // LA TABLE, SOUS L'EN-TÊTE (1.1.0) : une ligne, celle des hooks, et rien
+  // d'autre. Vide sans table — le silence des cas sains.
+  const table = ligneDeTableDuPli(l);
   return `
     <div class="pli__tete">
       <div class="pli__de"><b>${echapper(l.de)}</b>to ${echapper(l.a)}${
@@ -628,6 +661,7 @@ export function dessinerPli(l, local) {
       ${dessinerCachet(l)}
     </div>
     ${l.objet ? `<p class="pli__objet">${echapper(l.objet)}</p>` : ""}
+    ${table ? `<p class="pli__table">${echapper(table)}</p>` : ""}
     ${corpsEnParagraphes(l.corps)}
     ${pied(l, local)}`;
 }

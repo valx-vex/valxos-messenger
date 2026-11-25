@@ -18,6 +18,13 @@
 //   messages.sender_model     — le modèle voyage AVEC la lettre, plus avec la fiche
 //   messages.carried_at       — « remis au guichet » : ni « livré », ni « accusé »
 //   messages.facteur_not_before_ms — l'AJOURNEMENT : « pas avant cette heure-ci »
+//   messages.envoi_id         — le lien entre les lettres d'un même envoi `table:<nom>` (7)
+//   messages.table_nom        — la table par laquelle la lettre est partie (7)
+//   messages.reponse_a        — le msg_id de la lettre à laquelle on répond (7)
+//   messages.sans_reveil      — 1 : lettre CALME, ni socket, ni Facteur, ni filet du Stop (7)
+//   messages.sans_copie       — 1 : aucune copie cc à une autre chaise — table fermée (7)
+//   messages.sender_chaise    — la chaise qui a posté, pour l'affichage seulement (7)
+//   messages.reservices       — re-services sans accusé, pour espacer les rappels (7)
 //
 // carried_at est le marqueur du Facteur. Il ne prouve QUE ceci : la boîte a
 // accepté les octets. La terminalité d'une lettre appartient à l'accusé du
@@ -66,7 +73,21 @@
 // où un nom peut ne plus se masquer ne doit pas se confondre avec un bureau où
 // n'importe quel porteur de l'ancien nom l'emporte. Les renvois d'avant restent
 // à 0 : une migration ne promeut personne en silence.
-export const SCHEMA_VERSION = 6;
+//
+// 7 : LES TABLES (21/10). Le carnet des tables (`tables`, `table_membres`,
+// `enclos`) et les sept colonnes d'une lettre de table sur `messages`. Une
+// table est un CARNET D'ADRESSES, jamais une boîte : aucune lettre n'est « à la
+// table » dans la base. Un bureau qui sait à qui écrire quand on lui dit
+// `table:<nom>` ne doit pas se confondre avec un bureau qui ne connaît que des
+// destinataires nommés.
+//
+// 8 : LE RELAIS (16/11). Six marques sur une lettre (`via`, `mac_origine`,
+// `porte_at`, `porte_vers`, `remise_rendue_at`, `accuse_rendu_at`) qui disent
+// par quel Mac elle a voyagé et où en est son aller-retour ; `peers.designe_at`, l'heure où
+// une chaise est désignée ; et `carnet`, le CARNET des chaises vues sur l'autre
+// Mac (une vue, jamais une boîte : aucune lettre n'y dort). Un bureau qui sait
+// relayer ne doit pas se confondre avec un bureau qui ignore qu'un autre Mac existe.
+export const SCHEMA_VERSION = 8;
 
 const ADDITIONS = [
   ["peers", "lineage", "TEXT"],
@@ -87,7 +108,31 @@ const ADDITIONS = [
   ["messages", "carried_at", "TEXT"],
   // L'ajournement du Facteur. Zéro par défaut : le courrier d'avant E.1 est
   // PRÊT dès la première tournée, aucune lettre héritée ne dort.
-  ["messages", "facteur_not_before_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (facteur_not_before_ms >= 0)"]
+  ["messages", "facteur_not_before_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (facteur_not_before_ms >= 0)"],
+  // 7 — LA LETTRE À UNE TABLE. Rien ne change pour une lettre d'aujourd'hui :
+  // chaque colonne est NULL ou 0 par défaut, et une lettre sans table n'en
+  // porte aucune. Les CHECK rendent un drapeau hors {0,1} impossible à écrire.
+  ["messages", "envoi_id", "TEXT"],
+  ["messages", "table_nom", "TEXT"],
+  ["messages", "reponse_a", "TEXT"],
+  ["messages", "sans_reveil", "INTEGER NOT NULL DEFAULT 0 CHECK (sans_reveil IN (0,1))"],
+  ["messages", "sans_copie", "INTEGER NOT NULL DEFAULT 0 CHECK (sans_copie IN (0,1))"],
+  ["messages", "sender_chaise", "TEXT"],
+  ["messages", "reservices", "INTEGER NOT NULL DEFAULT 0 CHECK (reservices >= 0)"],
+  // 8 — LE RELAIS. Tout est NULL par défaut : une lettre d'avant n'a jamais
+  // voyagé, et la migration ne lui invente aucun passage.
+  ["messages", "via", "TEXT"],
+  ["messages", "mac_origine", "TEXT"],
+  ["messages", "porte_at", "TEXT"],
+  // Le Mac à qui une lettre née ici a été OFFERTE (posé à l'export ; `porte_at`
+  // est la confirmation, posée quand il a importé) : c'est vers lui que repart
+  // l'accusé quand la lettre est accusée ICI (rulings R16 et R20, la copie qui
+  // resterait sinon non accusée là-bas).
+  ["messages", "porte_vers", "TEXT"],
+  ["messages", "remise_rendue_at", "TEXT"],
+  ["messages", "accuse_rendu_at", "TEXT"],
+  // L'heure où la chaise a été désignée de sa lignée (NULL : jamais datée).
+  ["peers", "designe_at", "TEXT"]
 ];
 
 // Les tentatives et le balayage. `CREATE TABLE IF NOT EXISTS` : rejouable à
@@ -158,6 +203,63 @@ const TABLES = [
      depose_at  TEXT NOT NULL,
      prioritaire INTEGER NOT NULL DEFAULT 0 CHECK (prioritaire IN (0,1)),
      CHECK (ancien_nom <> lignee)
+   )`,
+  // ── LE CARNET DES TABLES (7, 21/10) ────────────────────────────────────────
+  // Une table est un carnet d'adresses, jamais une boîte : aucune lettre n'est
+  // « à la table » dans la base, une table ne garde aucun courrier. Les trois
+  // tables disent À QUI écrire (membres), COMMENT réveiller (reveil, mode) et
+  // QUI ne peut écrire QU'ICI (enclos). Les CHECK rendent un réglage inconnu
+  // impossible à écrire, comme pour `facteur_attempts.state`. Camp B : une
+  // table ne se supprime pas (aucune fonction ne le fait), un membre retiré
+  // reste en ligne avec son heure (`retire_le`) et se réactive en la remettant
+  // à NULL. `table_membres.reveil` NULL = le réglage de la table.
+  `CREATE TABLE IF NOT EXISTS tables (
+     nom          TEXT PRIMARY KEY CHECK (length(nom) > 0),
+     fermee       INTEGER NOT NULL DEFAULT 0 CHECK (fermee IN (0,1)),
+     reveil       TEXT NOT NULL DEFAULT 'reveil' CHECK (reveil IN ('reveil', 'prochain-tour')),
+     mode         TEXT NOT NULL DEFAULT 'normal' CHECK (mode IN ('normal', 'direct')),
+     position     TEXT,
+     position_par TEXT,
+     position_le  TEXT,
+     creee_par    TEXT,
+     creee_le     TEXT NOT NULL,
+     modifiee_le  TEXT NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS table_membres (
+     nom_table  TEXT NOT NULL,
+     adresse    TEXT NOT NULL CHECK (length(trim(adresse)) > 0),
+     reveil     TEXT CHECK (reveil IS NULL OR reveil IN ('reveil', 'prochain-tour')),
+     ajoute_par TEXT,
+     ajoute_le  TEXT NOT NULL,
+     retire_par TEXT,
+     retire_le  TEXT,
+     PRIMARY KEY (nom_table, adresse)
+   )`,
+  // L'enclos d'un expéditeur : ses lettres ne partent que vers les membres de
+  // cette table FERMÉE (guichet.js, `verifierEnclos`). Une ligne par expéditeur,
+  // posée et retirée par la CLI seulement (geste humain, SPEC_A §10). Camp B,
+  // comme pour un membre : retirer un enclos le MARQUE (`retire_le`,
+  // `retire_par`), la ligne reste, et re-poser la réactive. Un enclos actif a
+  // `retire_le` à NULL.
+  `CREATE TABLE IF NOT EXISTS enclos (
+     expediteur TEXT PRIMARY KEY CHECK (length(trim(expediteur)) > 0),
+     nom_table  TEXT NOT NULL,
+     pose_par   TEXT,
+     pose_le    TEXT NOT NULL,
+     retire_par TEXT,
+     retire_le  TEXT
+   )`,
+  // 8 — LE CARNET DES CHAISES VUES, sur tous les Macs (le nôtre compris). Une
+  // vue, jamais une boîte : aucune lettre n'y dort.
+  `CREATE TABLE IF NOT EXISTS carnet (
+     chaise_id           TEXT PRIMARY KEY,
+     lineage             TEXT NOT NULL,
+     instance_session_id TEXT,
+     mac                 TEXT NOT NULL,
+     is_primary          INTEGER NOT NULL DEFAULT 0,
+     designe_at          TEXT,
+     vu_at               TEXT NOT NULL,
+     parti_at            TEXT
    )`
 ];
 
@@ -166,7 +268,13 @@ const TABLES = [
 // le CREATE (rien à faire) ; sur un bureau en version 5 elle arrive ici, avec
 // la même contrainte — un ALTER sans CHECK laisserait écrire une marque 2.
 const ADDITIONS_APRES_TABLES = [
-  ["anciens_noms", "prioritaire", "INTEGER NOT NULL DEFAULT 0 CHECK (prioritaire IN (0,1))"]
+  ["anciens_noms", "prioritaire", "INTEGER NOT NULL DEFAULT 0 CHECK (prioritaire IN (0,1))"],
+  // 7 — le retrait DOUX de l'enclos. `CREATE TABLE IF NOT EXISTS` ne rajoute
+  // jamais une colonne : un bureau déjà tamponné 7 par une version d'avant le
+  // retrait doux garderait un enclos sans ces deux colonnes, et chaque lecture
+  // d'enclos échouerait. NULL = enclos actif, comme `table_membres.retire_le`.
+  ["enclos", "retire_par", "TEXT"],
+  ["enclos", "retire_le", "TEXT"]
 ];
 
 const INDEXES = [
@@ -187,7 +295,23 @@ const INDEXES = [
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_facteur_one_active_attempt
      ON facteur_attempts(msg_id) WHERE state IN ('reservee', 'liee')`,
   "CREATE INDEX IF NOT EXISTS idx_facteur_attempts_lease ON facteur_attempts(state, lease_until_ms)",
-  "CREATE INDEX IF NOT EXISTS idx_facteur_attempts_target ON facteur_attempts(msg_id, target_session_id, attempt_id)"
+  "CREATE INDEX IF NOT EXISTS idx_facteur_attempts_target ON facteur_attempts(msg_id, target_session_id, attempt_id)",
+  // « les lettres d'un envoi » — la question d'`envoi_status`.
+  "CREATE INDEX IF NOT EXISTS idx_messages_envoi ON messages(envoi_id)",
+  // « le fil d'une table, dans l'ordre » — la question de `history --table`.
+  "CREATE INDEX IF NOT EXISTS idx_messages_table_seq ON messages(table_nom, seq)",
+  // « de quelles tables cette adresse est-elle membre ? » — la question de `tables`.
+  "CREATE INDEX IF NOT EXISTS idx_table_membres_adresse ON table_membres(adresse)",
+  // « quelles chaises de cette lignée, et sur quel Mac ? » — les questions du relais.
+  "CREATE INDEX IF NOT EXISTS idx_carnet_lineage ON carnet(lineage)",
+  "CREATE INDEX IF NOT EXISTS idx_carnet_mac ON carnet(mac)",
+  // « cette lettre a-t-elle déjà cet événement ? » — la marque du retour à l'expéditeur, lue par
+  // chaque balayage pour chaque lettre en attente (retour.js). Un index, pas une colonne : le
+  // schéma reste le même (vague finale de la 1.1.0, 21/11).
+  "CREATE INDEX IF NOT EXISTS idx_delivery_events_msg_type ON delivery_events(msg_id, event_type)",
+  // « ce nom a-t-il déjà écrit, ou reçu une livraison ? » — la question de `nomJamaisPorte`.
+  "CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender)",
+  "CREATE INDEX IF NOT EXISTS idx_delivery_events_agent_type ON delivery_events(agent_id, event_type)"
 ];
 
 export function schemaVersion(db) {
@@ -250,7 +374,8 @@ export function migrate(db) {
     }
   }
 
-  // 5 → 6 : la marque d'alias, sur une table qui vient (peut-être) de naître.
+  // 5 → 6 : la marque d'alias ; 7 : le retrait doux de l'enclos — des colonnes
+  // sur des tables qui viennent (peut-être) de naître.
   ajouterColonnes(db, ADDITIONS_APRES_TABLES, manquantes, colonnesRatees);
 
   const indexesManques = [];

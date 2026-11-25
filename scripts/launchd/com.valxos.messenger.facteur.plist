@@ -22,6 +22,8 @@
     <string>__HOME__</string>
     <key>VALXOS_MESSENGER_HOME</key>
     <string>__RUNTIME_HOME__</string>
+    <key>VALXOS_MAISONS</key>
+    <string>__VALXOS_MAISONS__</string>
     <key>PATH</key>
     <string>__NODE_DIR__:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

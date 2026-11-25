@@ -42,8 +42,10 @@ import {
   noterLaRemise,
   perimerLesBaux,
   plierLaLettre,
-  prendreUneLettre
+  prendreUneLettre,
+  scannerLesMaisons
 } from "../src/facteur/round.js";
+import { procStartOf } from "../src/lib/postbox.js";
 import { registerPeer } from "../src/lib/database.js";
 import { resolveRecipient } from "../src/lib/registry.js";
 import { cheminDuVerrou, demarrerLeFacteur, lireLeVerrou, prendreLeVerrou } from "../src/facteur/daemon.js";
@@ -1897,6 +1899,51 @@ test("le défaut des maisons est `.claude`, plus la maison désignée si elle es
   }
 });
 
+// LES RUES DE MAISONS (1.1.0, Tâche 2). Une entrée de la déclaration qui finit
+// par `/*` est une RUE : chaque DOSSIER sous ce chemin est une maison. Les
+// fichiers et les liens cassés sont ignorés, l'ordre est celui du tri, et une
+// entrée sans `/*` garde son sens. Le décor est un VRAI arbre sous mkdtemp :
+// deux dossiers, un lien vers un dossier (une maison), un fichier, un lien
+// cassé et un lien vers un fichier (ignorés), et deux noms hors ASCII que le tri
+// de JavaScript (unités UTF-16) et celui de Python (points de code) rangent à
+// l'envers l'un de l'autre — le moniteur doit trier comme le Node.
+function rueDeMaisons() {
+  const racine = decorJetable("cc2cc-facteur-rue-");
+  const rue = path.join(racine, "maisons");
+  for (const nom of ["bob", "alice", "\u{1F600}", "ａ"]) fs.mkdirSync(path.join(rue, nom), { recursive: true });
+  fs.mkdirSync(path.join(racine, "ailleurs", "carol"), { recursive: true });
+  fs.symlinkSync(path.join(racine, "ailleurs", "carol"), path.join(rue, "carol"));
+  fs.writeFileSync(path.join(rue, "notes.txt"), "pas une maison");
+  fs.symlinkSync(path.join(racine, "nulle-part"), path.join(rue, "lien-casse"));
+  fs.symlinkSync(path.join(rue, "notes.txt"), path.join(rue, "lien-fichier"));
+  fs.mkdirSync(path.join(racine, "vide"));
+  return { racine, rue };
+}
+
+const RUE = rueDeMaisons();
+const MAISONS_DE_LA_RUE = ["alice", "bob", "carol", "\u{1F600}", "ａ"].map((nom) => path.join(RUE.rue, nom));
+const CAS_DES_RUES = [
+  ["une rue : chaque dossier est une maison, un lien vers un dossier aussi, dans l'ordre du tri", { VALXOS_MAISONS: `${RUE.rue}/*` }, MAISONS_DE_LA_RUE],
+  ["sans `/*`, la même entrée garde son sens : le dossier lui-même", { VALXOS_MAISONS: RUE.rue }, [RUE.rue]],
+  [
+    "le mélange garde l'ordre déclaré : une maison, une rue, une maison",
+    { VALXOS_MAISONS: `/opt/valxos/avant:${RUE.rue}/*:/opt/valxos/apres` },
+    ["/opt/valxos/avant", ...MAISONS_DE_LA_RUE, "/opt/valxos/apres"]
+  ],
+  ["une rue absente ne plante pas, et la déclaration remplace quand même le défaut", { VALXOS_MAISONS: `${RUE.racine}/absente/*`, CLAUDE_CONFIG_DIR: "/ailleurs/cfg" }, []],
+  ["une rue vide ne rend aucune maison", { VALXOS_MAISONS: `${RUE.racine}/vide/*` }, []],
+  ["une rue qui est un fichier ne rend aucune maison", { VALXOS_MAISONS: `${RUE.rue}/notes.txt/*` }, []],
+  ["une rue écarte aussi CLAUDE_CONFIG_DIR, et l'alias historique la lit", { CC2CC_MAISONS: `${RUE.rue}/*`, CLAUDE_CONFIG_DIR: "/ailleurs/cfg" }, MAISONS_DE_LA_RUE],
+  ["sans déclaration, le défaut reste ~/.claude, même quand une rue existe", { HOME: "/chez-nous" }, ["/chez-nous/.claude"]],
+  ["une étoile dans CLAUDE_CONFIG_DIR n'est pas une rue : seule la déclaration se développe", { CLAUDE_CONFIG_DIR: `${RUE.rue}/*` }, ["/chez-nous/.claude", `${RUE.rue}/*`]]
+];
+
+test("une rue de maisons (`/*`) : chaque dossier sous le chemin est une maison — fichiers et liens cassés ignorés, ordre du tri", () => {
+  for (const [cas, env, attendu] of CAS_DES_RUES) {
+    assert.deepEqual(maisonsConnues({ env: { HOME: "/chez-nous", ...env } }), attendu, cas);
+  }
+});
+
 test("le moniteur Python connaît les MÊMES maisons que le Node, cas par cas (HOUSES_DEFAULT = MAISONS_PAR_DEFAUT)", () => {
   const moniteur = path.join(RACINE, "src/monitor/valxos_monitor.py");
   const charger =
@@ -1909,14 +1956,63 @@ test("le moniteur Python connaît les MÊMES maisons que le Node, cas par cas (H
   });
   assert.equal(defaut.status, 0, `SONDE IMPOSSIBLE : le moniteur ne se charge pas\n${defaut.stderr}`);
   assert.deepEqual(JSON.parse(defaut.stdout), MAISONS_PAR_DEFAUT, "HOUSES_DEFAULT est MAISONS_PAR_DEFAUT");
-  for (const [cas, env] of CAS_DES_MAISONS) {
+  // Les rues aussi (1.1.0) : le Python rend ce que le Node rend ET ce que le
+  // cas attend — deux côtés faux de la même façon ne passent pas.
+  for (const [cas, env, attendu] of [...CAS_DES_MAISONS, ...CAS_DES_RUES]) {
     const py = spawnSync("python3", ["-B", "-c", `${charger}print(json.dumps([str(h) for h in m.known_houses()]))`], {
       encoding: "utf8",
       env: { PATH: process.env.PATH, HOME: "/chez-nous", ...env }
     });
     assert.equal(py.status, 0, `${cas} : SONDE IMPOSSIBLE\n${py.stderr}`);
     assert.deepEqual(JSON.parse(py.stdout), maisonsConnues({ env: { HOME: "/chez-nous", ...env } }), cas);
+    assert.deepEqual(JSON.parse(py.stdout), attendu, `${cas} (Python)`);
   }
+});
+
+// LA RUE DANS LA TOURNÉE (1.1.0, Tâche 2). Avant les rues, une chaise vivante
+// dont la maison est `<…>/maisons/<nom>` était « maison-inconnue » pour toujours :
+// l'inventaire ne connaissait que `~/.claude`, et la déclaration une liste
+// littérale. Ici tout est vrai sauf le guichet : un bureau jetable, un arbre de
+// maisons sous mkdtemp, la fiche de session de CE processus (vivant, heure de
+// démarrage lue par ps), et la vraie tournée des maisons, `maisonsConnues`
+// compris. Le témoin — la même rue déclarée sans `/*` — dit `maison-inconnue`.
+test("une chaise vivante dont la maison est dans une rue (`maisons/*`) n'est plus « maison-inconnue » : la tournée la visite et lui porte sa lettre", async (t) => {
+  const db = bureauDePoste(t);
+  const racine = decorJetable("cc2cc-facteur-rue-vivante-");
+  const rue = path.join(racine, "maisons");
+  const maison = path.join(rue, "alice");
+  fs.mkdirSync(path.join(maison, "sessions"), { recursive: true });
+  fs.mkdirSync(path.join(rue, "bob")); // une voisine sans registre : visitée, rien à y prendre
+  const procStart = procStartOf(process.pid);
+  assert.ok(procStart, "SONDE IMPOSSIBLE : ps ne rend pas l'heure de démarrage de ce processus");
+  const socketPath = path.join(racine, "carton.sock");
+  fs.writeFileSync(
+    path.join(maison, "sessions", `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, sessionId: "s-rue", procStart, messagingSocketPath: socketPath, name: "alice" })
+  );
+  registerInstance(db, { lineage: "alice", sessionId: "s-rue", house: maison, pid: process.pid });
+  insertMessage(db, { msg_id: "L-rue", sender: "bob", recipient: "alice", body: "bonjour" });
+
+  const temoin = { HOME: racine, VALXOS_MAISONS: rue };
+  const avant = avisDAttente(db, { recipient: "alice" }, { ...scannerLesMaisons({ env: temoin, db }), resoudre: resolveRecipient });
+  assert.equal(avant?.motif, "maison-inconnue", "témoin : sans `/*`, la rue est une seule maison, et la chaise n'y est pas");
+
+  const env = { HOME: racine, VALXOS_MAISONS: `${rue}/*` };
+  const scan = scannerLesMaisons({ env, db });
+  assert.deepEqual(
+    scan.houses.map((h) => [h.house, h.readable]),
+    [[maison, true], [path.join(rue, "bob"), false]],
+    "la tournée visite chaque maison de la rue, dans l'ordre du tri"
+  );
+  assert.equal(avisDAttente(db, { recipient: "alice" }, { ...scan, resoudre: resolveRecipient }), null, "le guichet n'annonce plus d'attente");
+
+  const guichet = guichetDeCarton();
+  const bilan = await faireLaTournee(db, { env, dormir: async () => {}, remettreAuGuichet: guichet.remettre });
+  assert.equal(bilan.motifs["maison-inconnue"], undefined, "plus de maison-inconnue");
+  assert.equal(bilan.remises, 1, "la tournée porte la lettre");
+  assert.equal(guichet.remises.length, 1);
+  assert.equal(guichet.remises[0].socketPath, socketPath, "à la boîte de la fiche, dans la maison de la rue");
+  assert.equal(guichet.remises[0].envelope.session_id, "s-rue", "le verrou d'incarnation vise la session de la fiche");
 });
 
 // ---------------------------------------------------------------------------
@@ -2225,6 +2321,65 @@ test("à l'arrêt, les tournées muettes non dites partent dans un dernier batte
     ordre.indexOf("facteur_battement") < ordre.indexOf("facteur_hors_service"),
     "le battement final précède la sortie de service"
   );
+});
+
+// LA RUE SE RELIT À CHAQUE TOURNÉE, DÉMON COMPRIS (A4, 1.1.0, Tâche 2). Le
+// point d'entrée calculait la liste UNE fois, au démarrage, et la tendait
+// figée à chaque tournée : une maison née dans la rue après le départ du démon
+// restait « maison-inconnue » jusqu'au redémarrage. Ici elle naît APRÈS
+// « facteur_en_service » ; la tournée suivante la connaît (sa boîte dort : son
+// registre est vide), elle ne la dit plus inconnue. L'ajournement d'une lettre
+// inacheminable est réduit à 1 ms pour que la seconde tournée la reprenne.
+// La fenêtre entre les deux tournées est de 5 s (2 s avant la vague finale du
+// 21/11) : la maison doit naître dedans, et sous charge 2 s ne suffisaient pas
+// toujours. Ce test ne peut que tomber à tort, jamais passer à tort.
+test("le démon relit la rue à chaque tournée : une maison née après son départ est connue à la tournée suivante", async (t) => {
+  const db = bureauDePoste(t);
+  const rue = path.join(decorJetable("cc2cc-facteur-rue-demon-"), "maisons");
+  fs.mkdirSync(rue);
+  const maison = path.join(rue, "alice");
+  chaise(db, { lignee: "alice", session: "s-tard", maison, pid: 9 });
+  insertMessage(db, { msg_id: "L-tard", sender: "bob", recipient: "alice", body: "x" });
+  const racine = db.racine;
+  db.close();
+
+  const enfant = spawn(process.execPath, [path.join(RACINE, "src/bin/facteur.js"), "--tours", "2"], {
+    env: {
+      ...envPropre(),
+      CC2CC_V2_HOME: racine,
+      VALXOS_MAISONS: `${rue}/*`,
+      CC2CC_FACTEUR_TOURNEE_CHAQUE_MS: "5000",
+      CC2CC_FACTEUR_AJOURNEMENT_INACHEMINABLE_MS: "1"
+    }
+  });
+  t.after(() => enfant.kill("SIGKILL"));
+  let journal = "";
+  let nee = false;
+  enfant.stdout.resume();
+  enfant.stderr.on("data", (bloc) => {
+    journal += bloc;
+    if (!nee && journal.includes("facteur_en_service")) {
+      nee = true;
+      fs.mkdirSync(path.join(maison, "sessions"), { recursive: true });
+    }
+  });
+  const status = await new Promise((resolve) => enfant.on("close", resolve));
+  assert.equal(status, 0, journal);
+  assert.ok(nee, `SONDE IMPOSSIBLE : le démon n'a jamais dit facteur_en_service\n${journal}`);
+  const tournees = journal
+    .split("\n")
+    .map((ligne) => {
+      try {
+        return JSON.parse(ligne);
+      } catch {
+        return null;
+      }
+    })
+    .filter((evenement) => evenement?.evenement === "facteur_tournee");
+  assert.equal(tournees.length, 2, `SONDE IMPOSSIBLE : deux tournées attendues au journal\n${journal}`);
+  const derniere = tournees.at(-1);
+  assert.equal(derniere.motifs?.["maison-inconnue"], undefined, `la maison née après le départ n'est plus inconnue\n${journal}`);
+  assert.equal(derniere.motifs?.["boite-endormie"], 1, `elle est connue, et sa boîte dort\n${journal}`);
 });
 
 test("une tournée one-shot muette laisse quand même sa ligne facteur_tournee", (t) => {

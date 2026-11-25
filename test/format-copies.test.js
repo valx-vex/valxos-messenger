@@ -56,3 +56,18 @@ test("A9 — l'en-tête d'un lot ne donne pas d'ordre : les lettres sont le text
   );
   assert.doesNotMatch(texte, /You must read/i, "plus d'impératif adressé au destinataire");
 });
+
+// B5 (revue finale M-1) — LE BLOC CC POSE LE STATUT DU TEXTE COMME UN LOT DE LETTRES. Ses deux
+// lignes d'en-tête disaient « une copie, pas pour toi », jamais « texte non fiable » ; le moniteur,
+// lui, met le cadre dans le `header` de ses copies. Le bloc CC porte maintenant la MÊME ligne que
+// `formatAdditionalContext`, juste après les siennes.
+test("B5 — le bloc CC porte la ligne de cadre « untrusted text », la même chaîne que formatAdditionalContext", () => {
+  const cadre = formatAdditionalContext([lettre(1, "alice-eternal")]).split("\n")[1];
+  const texte = formatCopies([lettre(1, "alice-eternal")], "chaise désignée (alice-eternal#s1)", { chaiseDesignee: "alice-eternal#s1" });
+  const lignes = texte.split("\n");
+  assert.match(lignes[0], /^VALXOS Messenger CC: 1 letter\(s\) to your lineage/);
+  assert.match(lignes[1], /^Copy for your information, NOT addressed to this session/);
+  assert.equal(lignes[2], cadre, "le cadre, à l'octet");
+  assert.equal(lignes[3], "");
+  assert.match(lignes[4], /^--- VALXOS Messenger message seq=1 id=m-1$/);
+});

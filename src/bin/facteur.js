@@ -23,6 +23,7 @@ import { maisonsConnues, reglagesDuFacteur } from "../lib/config.js";
 import { openDatabase } from "../lib/database.js";
 import { demarrerLeFacteur, journalNdjson } from "../facteur/daemon.js";
 import { faireLaTournee, tourneeBougee } from "../facteur/round.js";
+import { sonnerLaChaiseCodex } from "../facteur/porte-codex.js";
 import { Sortie, executer, optionalArg, parseArgs } from "./cli-common.js";
 
 // UNE SEULE SORTIE : `principal()` rend un code (`return` après le refus,
@@ -142,11 +143,15 @@ async function principal() {
   }
 
   const journal = options.silencieux ? () => {} : journalNdjson;
-  const maisons = options.maisons || maisonsConnues();
   const db = openDatabase();
 
   if (options.uneTournee) {
-    const bilan = await faireLaTournee(db, { maisons, journal, seulementLaLettre: options.seulementLaLettre });
+    const bilan = await faireLaTournee(db, {
+      maisons: options.maisons || maisonsConnues(),
+      journal,
+      seulementLaLettre: options.seulementLaLettre,
+      sonnerLaChaiseCodex
+    });
     // Un one-shot n'a pas de battement : sa tournée se dit TOUJOURS au journal,
     // même muette — un stderr vide ressemblerait à un job launchd cassé.
     if (!tourneeBougee(bilan)) journal({ evenement: "facteur_tournee", ...bilan });
@@ -168,12 +173,16 @@ async function principal() {
     });
   }
 
+  // Le démon ne fige PAS la liste des maisons : sans --maisons, chaque tournée
+  // relit `maisonsConnues()` (A4) — une maison née dans une rue (`…/*`) après
+  // le départ est connue à la tournée suivante. `--maisons` reste une liste
+  // littérale, donnée une fois.
   const resultat = await demarrerLeFacteur({
     db,
     tours: options.tours,
     signal: arret.signal,
     journal,
-    depsDeTournee: { maisons, seulementLaLettre: options.seulementLaLettre },
+    depsDeTournee: { maisons: options.maisons, seulementLaLettre: options.seulementLaLettre },
     reglages: reglagesDuFacteur()
   });
   process.stdout.write(`${JSON.stringify(resultat)}\n`);

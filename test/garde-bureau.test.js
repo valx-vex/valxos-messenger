@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { envPropre } from "./aide-env.js";
+import { GARDE_BUREAU_ENV_VALXOS, gardeDuBureau } from "../src/lib/config.js";
 
 const repo = path.resolve(new URL("..", import.meta.url).pathname);
 
@@ -98,6 +99,51 @@ test("CC2CC_V2_HOME posé : l'écriture passe sous garde — c'est exactement le
   assert.match(sonde.stdout, /POLLUE/, "écrire dans une base JETABLE est le chemin béni");
   assert.ok(fs.existsSync(path.join(jetable, "broker.db")), "la donnée est sortie DANS la base jetable");
   assert.ok(!fs.existsSync(path.join(home, ".cc2cc-v2", "broker.db")), "et jamais dans le bureau vivant");
+});
+
+// ── LA GARDE SOUS SES DEUX NOMS (1.1.0, Tâche 11) ──────────────────────────
+// La doc de câblage (docs/MCP_CLIENTS.md) fait écrire `VALXOS_GARDE_BUREAU = "1"`
+// dans le bloc env d'un client. La famille VALXOS_* gagnait par
+// `valeurDeLEnvironnement` — mais une clef neuve posée VIDE désarmait alors la
+// clef historique, et le refus nommait toujours CC2CC_GARDE_BUREAU. Désormais
+// l'une ou l'autre suffit, une clef vide compte pour absente (fail-closed, la
+// règle de `bureauExplicite`), et le refus nomme la clef qui a armé la garde.
+test("gardeDuBureau : l'une ou l'autre clef arme la garde ; vide compte pour absente ; la clef qui arme est nommée", () => {
+  assert.equal(GARDE_BUREAU_ENV_VALXOS, "VALXOS_GARDE_BUREAU");
+  assert.deepEqual(gardeDuBureau({ VALXOS_GARDE_BUREAU: "1" }), { active: true, clef: "VALXOS_GARDE_BUREAU" });
+  assert.deepEqual(gardeDuBureau({ CC2CC_GARDE_BUREAU: "1" }), { active: true, clef: "CC2CC_GARDE_BUREAU" });
+  assert.deepEqual(gardeDuBureau({ VALXOS_GARDE_BUREAU: "1", CC2CC_GARDE_BUREAU: "1" }), { active: true, clef: "VALXOS_GARDE_BUREAU" });
+  assert.deepEqual(gardeDuBureau({ VALXOS_GARDE_BUREAU: "", CC2CC_GARDE_BUREAU: "1" }), { active: true, clef: "CC2CC_GARDE_BUREAU" });
+  assert.deepEqual(gardeDuBureau({ VALXOS_GARDE_BUREAU: "  " }), { active: false, clef: null });
+  assert.deepEqual(gardeDuBureau({}), { active: false, clef: null });
+});
+
+test("VALXOS_GARDE_BUREAU=1 seule arme la garde, et le refus nomme CETTE clef", () => {
+  const home = fauxHome();
+  const sonde = sondeIntruse(home, { CC2CC_GARDE_BUREAU: undefined, VALXOS_GARDE_BUREAU: "1" });
+  assert.notEqual(sonde.status, 0, "la clef neuve arme la garde");
+  assert.match(sonde.stderr, /live office guard/);
+  assert.match(sonde.stderr, /This run set VALXOS_GARDE_BUREAU/, "le refus nomme la clef posée");
+  assert.match(sonde.stderr, /env -u VALXOS_GARDE_BUREAU/, "et le geste qui la lève, sous le même nom");
+  assert.ok(!sonde.stdout.includes("POLLUE"));
+  assert.ok(!fs.existsSync(path.join(home, ".valxos-messenger")), "pas même le mkdir");
+});
+
+test("CC2CC_GARDE_BUREAU=1 seule : le refus nomme la clef historique", () => {
+  const home = fauxHome();
+  const sonde = sondeIntruse(home);
+  assert.notEqual(sonde.status, 0);
+  assert.match(sonde.stderr, /This run set CC2CC_GARDE_BUREAU/);
+  assert.match(sonde.stderr, /env -u CC2CC_GARDE_BUREAU/);
+});
+
+test("VALXOS_GARDE_BUREAU posée VIDE ne désarme pas CC2CC_GARDE_BUREAU=1 — la garde est fail-closed", () => {
+  const home = fauxHome();
+  const sonde = sondeIntruse(home, { VALXOS_GARDE_BUREAU: "" });
+  assert.notEqual(sonde.status, 0, "une clef vide compte pour absente : l'autre clef garde");
+  assert.match(sonde.stderr, /This run set CC2CC_GARDE_BUREAU/);
+  assert.ok(!sonde.stdout.includes("POLLUE"));
+  assert.ok(!fs.existsSync(path.join(home, ".valxos-messenger", "broker.db")));
 });
 
 // La garde juge la CIBLE, pas la route qui y mène (note du Step 3 du brief).
@@ -288,14 +334,46 @@ test("contrôle positif : un lien vers une base JETABLE passe — la garde reste
 // déclaration est un théâtre : elle REJOUE toute la suite sous un faux HOME et
 // regarde si un bureau apparaît. Un chemin, pas un point.
 //
-// Ce que ça coûte : ~10 s, la suite tourne deux fois. Ce que ça achète : le
+// Ce que ça coûte : la suite tourne deux fois, l'une APRÈS l'autre (voir plus bas). Ce que ça achète : le
 // jour où un test neuf salit le bureau, c'est ROUGE ici, pas dans le
 // du bureau de l'opérateur.
 //
 // La SEULE exclusion est ce fichier-ci — sinon le balayage se rejouerait
 // lui-même sans fin. Elle est nommée, et c'est la seule : un instrument doit
 // pouvoir voir tout ce qu'on ne lui demande pas d'exclure.
-test("aucun fichier de la suite n'écrit dans le bureau vivant — la suite rejouée sous un faux HOME", { timeout: 180_000 }, () => {
+// ⚠️ LE BALAYAGE ATTEND LA FIN DES AUTRES FICHIERS (durcissement des délais, 22/10). Lancé pendant la
+// suite, il la faisait tourner DEUX FOIS À LA FOIS : sous cette charge (d'autres sessions en plus, une
+// CI à deux cœurs), les tests de délai de la porte Codex rougissaient, ici comme dans la rediffusion.
+// Le balayage attend donc que le runner n'ait plus aucun autre fichier en cours — les autres enfants
+// de son parent, lus par `ps` ; deux relevés vides à une seconde d'intervalle, pour ne pas tomber
+// entre la fin d'un fichier et le départ du suivant — puis rejoue TOUT, chaque fichier compris, sous
+// le faux HOME. Seul (`node --test test/garde-bureau.test.js`), il n'attend rien. L'attente est
+// bornée (ATTENTE_MAX_MS) : au-delà, ou sans `ps`, il rejoue quand même, et le dit.
+const ATTENTE_MAX_MS = 240_000;
+async function attendreLaFinDesAutresFichiers() {
+  const fin = Date.now() + ATTENTE_MAX_MS;
+  let videsDeSuite = 0;
+  for (;;) {
+    let freres;
+    try {
+      freres = execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" })
+        .split("\n")
+        .map((ligne) => ligne.trim().split(/\s+/).map(Number))
+        .filter(([pid, ppid]) => ppid === process.ppid && pid !== process.pid);
+    } catch {
+      return "ps illisible : rejoué sans attendre";
+    }
+    videsDeSuite = freres.length === 0 ? videsDeSuite + 1 : 0;
+    if (videsDeSuite >= 2) return null;
+    if (Date.now() > fin) return `${freres.length} fichier(s) encore en cours après ${ATTENTE_MAX_MS} ms : rejoué quand même`;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+test("aucun fichier de la suite n'écrit dans le bureau vivant — la suite rejouée sous un faux HOME", { timeout: ATTENTE_MAX_MS + 190_000 }, async (t) => {
+  const debutDeLAttente = Date.now();
+  const attente = await attendreLaFinDesAutresFichiers();
+  t.diagnostic(attente ?? `balayage : ${Date.now() - debutDeLAttente} ms d'attente des autres fichiers de la suite`);
   const home = fauxHome();
   const fichiers = fs
     .readdirSync(path.join(repo, "test"))
@@ -305,6 +383,10 @@ test("aucun fichier de la suite n'écrit dans le bureau vivant — la suite rejo
 
   const propre = { ...envPropre(), HOME: home };
   delete propre.CC2CC_V2_HOME;
+  // The replayed suite is a launcher, not a child: it declares no houses of
+  // its own (envPropre's empty houses are for the children it spawns).
+  delete propre.CC2CC_MAISONS;
+  delete propre.VALXOS_MAISONS;
   // LE BUREAU DU LANCEUR, REJOUÉ : un lanceur qui exporte VALXOS_MESSENGER_HOME
   // pour lui-même ne doit envoyer AUCUN test dans son bureau — ni par un
   // enfant qu'un test lance (envPropre), ni en-processus (un test qui pose

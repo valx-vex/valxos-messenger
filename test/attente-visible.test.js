@@ -79,7 +79,10 @@ test("attenteDeLaLettre : ambigu → avis nommé ; inconnu → avis destinataire
   // silence, même famille exacte que la seq 81. L'inconnu attend AUSSI désormais.
   const avisInconnu = attenteDeLaLettre(db, "personne-de-ce-nom");
   assert.equal(avisInconnu.motif, "destinataire-inconnu");
-  assert.match(avisInconnu.message, /^No peer in service answers to this name: /);
+  // 1.1.0, Tâche 3 : un nom que personne n'a JAMAIS porté le dit, avec les noms qui en approchent
+  // (aucun ici) ; un nom déjà porté garde l'avis d'avant (test/retour-a-l-expediteur.test.js).
+  assert.match(avisInconnu.message, /^No one has this name\. /);
+  assert.deepEqual(avisInconnu.suggestions, []);
   assert.match(avisInconnu.message, /waits until/);
   assert.equal(attenteDeLaLettre(null, "peu-importe"), null, "un avis qui jette casserait le send : il se tait");
 });
@@ -518,7 +521,7 @@ test("le send MCP RÉEL (scan de maison compris) reste silencieux pour une chais
   const transport = new StdioClientTransport({
     command: "node",
     args: [path.join(repo, "src/mcp-server/server.js")],
-    env: { ...envPropre(), CC2CC_V2_HOME: root, CC2CC_MAISONS: maison, CC2CC_SELF: "posteur-vraie-maison" }
+    env: envPropre({ CC2CC_V2_HOME: root, CC2CC_MAISONS: maison, CC2CC_SELF: "posteur-vraie-maison" })
   });
   await client.connect(transport);
   try {

@@ -9,17 +9,22 @@ import Database from "better-sqlite3";
 import {
   DEFAULT_CARRIED_GRACE_MS,
   DEFAULT_REDELIVER_AFTER_MS,
-  GARDE_BUREAU_ENV,
+  DEFAULT_REDELIVER_CAP_MS,
   ensureRuntimeDirs,
+  gardeDuBureau,
   homeDir,
   nowIso,
   runtimePaths,
-  valeurDeLEnvironnement,
   writeJsonAtomic
 } from "./config.js";
 import { migrate } from "./migrations.js";
-// format.js n'importe RIEN : aucun cycle à consommer son verdict d'ici.
+// format.js n'importe que la borne de tables.js (qui n'importe que config.js) :
+// aucun cycle à consommer son verdict d'ici.
 import { enSouffrance } from "./format.js";
+// Le carnet des tables est l'autorité sur « quelle table, quels membres » : l'en-tête
+// lui pose la question (`enrichirPourAffichage`) au lieu de recopier ses requêtes.
+// (tables.js n'importe que config.js — pas de cycle.)
+import { estMembre, obtenirTable } from "./tables.js";
 // Le registre est l'autorité sur « qui est qui » : l'accusé lui pose la question
 // au lieu de se réinventer une réponse. (registry.js n'importe pas database.js —
 // pas de cycle.)
@@ -28,7 +33,8 @@ import {
   SEPARATEUR_INSTANCE,
   STATUTS_HORS_SERVICE,
   aliasQuiMenentA,
-  deciderLaCopie,
+  deciderLaCopieAuRegistre,
+  estUneChaiseCourte,
   getInstance,
   resolveRecipient,
   verdictDeChaise
@@ -110,7 +116,9 @@ function cheminReel(candidat) {
 }
 
 function refuserLeBureauVivantSousGarde(file, readonly) {
-  if (readonly || !valeurDeLEnvironnement(process.env, GARDE_BUREAU_ENV)) return;
+  if (readonly) return;
+  const garde = gardeDuBureau();
+  if (!garde.active) return;
   const bureauxVivants = [".valxos-messenger", ".cc2cc-v2"]
     .map((nom) => cheminReel(path.join(homeDir(), nom)));
   const cible = cheminReel(file);
@@ -118,11 +126,13 @@ function refuserLeBureauVivantSousGarde(file, readonly) {
     (bureau) => cible === bureau || cible.startsWith(bureau + path.sep)
   );
   if (!bureauVivant) return;
+  // Le refus nomme la clef qui a ARMÉ la garde : c'est elle que l'opérateur
+  // lèvera (`env -u`), et la nommer de travers l'enverrait chercher ailleurs.
   throw new Error(
     `live office guard: opening ${cible} for WRITING is refused. ` +
-      `This run set ${GARDE_BUREAU_ENV}. Point VALXOS_MESSENGER_HOME ` +
+      `This run set ${garde.clef}. Point VALXOS_MESSENGER_HOME ` +
       `(or CC2CC_V2_HOME) at a throwaway office (mkdtemp), ` +
-      `or lift the guard (env -u ${GARDE_BUREAU_ENV}) for a deliberate operator gesture.`
+      `or lift the guard (env -u ${garde.clef}) for a deliberate operator gesture.`
   );
 }
 
@@ -311,7 +321,30 @@ export function inscrireUneLettre(db, input) {
     // Le modèle voyage AVEC la lettre. La fiche du pair ne le sait pas : elle
     // est estampillée par le dernier hook passé, sous-agents compris.
     // Inconnu se dit NULL — jamais « le dernier qu'on a vu ».
-    sender_model: input.sender_model || input.senderModel || null
+    sender_model: input.sender_model || input.senderModel || null,
+    // ── 1.1.0 : la lettre de table ──────────────────────────────────────────
+    // `envoi_id` lie les lettres d'un même `table:<nom>` ; `table_nom` dit
+    // laquelle ; `reponse_a` le msg_id auquel on répond ; `sans_reveil` et
+    // `sans_copie` sont DÉCIDÉS au guichet et écrits ici, jamais recalculés
+    // par un porteur ; `sender_chaise` est la chaise qui a posté, pour
+    // l'affichage seulement — aucune règle de routage ni d'accusé ne la lit.
+    // Inconnu se dit NULL, et un drapeau absent vaut 0 : une lettre d'hier ne
+    // porte rien de neuf. `reservices` n'est PAS ici : une lettre naît à 0 (le
+    // défaut de la colonne) et seul le porteur l'incrémente, jamais l'appelant.
+    envoi_id: input.envoi_id || null,
+    table_nom: input.table_nom || null,
+    reponse_a: input.reponse_a || null,
+    sans_reveil: input.sans_reveil ? 1 : 0,
+    sans_copie: input.sans_copie ? 1 : 0,
+    sender_chaise: input.sender_chaise || null,
+    // ── Schéma 8 : le relais ────────────────────────────────────────────────
+    // `via` ("relais") et `mac_origine` (le Mac d'où la lettre arrive) ne sont
+    // écrits que par l'import d'un paquet : le guichet refuse ces deux champs à
+    // tout autre posteur (`via-reservee-au-relais`, guichet.js). Ce ne sont PAS
+    // des champs du posteur (`CHAMPS_DU_POSTEUR`) : un rejeu ne les « écarte »
+    // jamais, la lettre est la même quel que soit le chemin qui l'a apportée.
+    via: input.via || null,
+    mac_origine: input.mac_origine || null
   };
   if (!msg.sender || !msg.recipient || !msg.body) {
     throw new Error("insertMessage requires sender, recipient, and body");
@@ -321,11 +354,15 @@ export function inscrireUneLettre(db, input) {
     .prepare(`
       INSERT INTO messages (
         msg_id, sender, recipient, thread_id, subject, body,
-        priority, msg_type, created_at, source, raw_json, sender_model
+        priority, msg_type, created_at, source, raw_json, sender_model,
+        envoi_id, table_nom, reponse_a, sans_reveil, sans_copie, sender_chaise,
+        via, mac_origine
       )
       VALUES (
         @msg_id, @sender, @recipient, @thread_id, @subject, @body,
-        @priority, @msg_type, @created_at, @source, @raw_json, @sender_model
+        @priority, @msg_type, @created_at, @source, @raw_json, @sender_model,
+        @envoi_id, @table_nom, @reponse_a, @sans_reveil, @sans_copie, @sender_chaise,
+        @via, @mac_origine
       )
       ON CONFLICT(msg_id) DO NOTHING
     `)
@@ -367,6 +404,60 @@ export function getMessageById(db, msgId) {
   return db.prepare("SELECT * FROM messages WHERE msg_id = ?").get(msgId);
 }
 
+// LA LETTRE PAR L'IDENTIFIANT QU'ON A SOUS LES YEUX. Le `msg_id` d'abord (le
+// marqueur `id=` de la remise). À défaut, l'identifiant du pli que le Facteur
+// dépose (`Receipt: <attempt_id>`, round.js `plierLaLettre`) : une tentative de
+// portage porte UNE lettre, la résolution est sans ambiguïté. Le `msg_id` gagne
+// toujours, et un identifiant inconnu des deux rend `undefined`.
+export function getMessageByAnyId(db, id) {
+  const direct = getMessageById(db, id);
+  if (direct) return direct;
+  const tentative = db.prepare("SELECT msg_id FROM facteur_attempts WHERE attempt_id = ?").get(id);
+  return tentative ? getMessageById(db, tentative.msg_id) : undefined;
+}
+
+// LES LETTRES D'UN ENVOI (1.1.0). Un `table:<nom>` produit une lettre par
+// membre, toutes liées par `envoi_id` ; c'est ce que `envoi_status` relit,
+// membre par membre. `seq` est l'ordre de naissance (AUTOINCREMENT) : il ne
+// ment jamais, là où une horloge peut reculer. Sans identifiant, rien — jamais
+// la table entière par défaut.
+export function lettresDUnEnvoi(db, envoiId) {
+  const id = String(envoiId || "").trim();
+  if (!id) return [];
+  return db.prepare("SELECT * FROM messages WHERE envoi_id = ? ORDER BY seq ASC").all(id);
+}
+
+// LA FENÊTRE D'UNE LETTRE (1.1.0, Tâche 8) : `min(base × 2^rappels, plafond)`. `base` est la
+// fenêtre d'avant (`DEFAULT_REDELIVER_AFTER_MS`, 10 min) ; `rappels` est `messages.reservices`,
+// le compte des re-services déjà faits (`markDelivered` le tient). Le plafond ne descend jamais
+// sous la base : un opérateur qui ALLONGE la base garde sa fenêtre. L'exposant est borné à 30 :
+// au-delà, le plafond parle depuis longtemps, et 2^1000 n'est pas un nombre. Pure.
+export function fenetreDeReService(
+  reservices,
+  { base = DEFAULT_REDELIVER_AFTER_MS, plafond = DEFAULT_REDELIVER_CAP_MS } = {}
+) {
+  const rappels = Math.max(0, Math.floor(Number(reservices) || 0));
+  const socle = Math.max(0, Number(base) || 0);
+  const haut = Math.max(Number(plafond) || 0, socle);
+  return Math.min(socle * 2 ** Math.min(rappels, 30), haut);
+}
+
+// LES PALIERS, pour la requête : un palier par valeur de `reservices` jusqu'à celle où le plafond
+// est atteint ; le dernier vaut pour cette valeur ET au-delà (`>=`). Quatre paliers avec les
+// défauts (0 → 10 min, 1 → 20, 2 → 40, 3+ → 60) ; jamais plus de 32. Pure.
+export function paliersDeReService(
+  { base = DEFAULT_REDELIVER_AFTER_MS, plafond = DEFAULT_REDELIVER_CAP_MS } = {}
+) {
+  const paliers = [];
+  const plusHaute = fenetreDeReService(31, { base, plafond });
+  for (let rappels = 0; rappels < 32; rappels += 1) {
+    const fenetreMs = fenetreDeReService(rappels, { base, plafond });
+    paliers.push({ rappels, fenetreMs });
+    if (fenetreMs >= plusHaute) break;
+  }
+  return paliers;
+}
+
 // Ce que le canal de repli (les hooks) doit servir.
 //
 // ⚠️ CETTE FENÊTRE GOUVERNE LE PORTEUR, JAMAIS LE DESTINATAIRE (remède de la
@@ -403,6 +494,9 @@ export function getMessageById(db, msgId) {
 // `markDelivered`) : une lettre jamais accusée revient donc au plus une fois
 // par fenêtre de re-service PAR CE CHEMIN, et elle revient
 // aussi longtemps qu'il le faudra.
+// Depuis 1.1.0 (Tâche 8), la fenêtre DOUBLE à chaque re-service — 10, 20, 40
+// minutes, puis une heure au plus (`reservices`, `fenetreDeReService`) : les
+// rappels s'espacent, ils ne cessent jamais.
 // `recipient` accepte UN nom ou PLUSIEURS (`adressesDuRepli`) : une session
 // relève la boîte de sa lignée et celle de ses propres chaises. Aucune adresse
 // ne rend aucune lettre — jamais toutes.
@@ -424,8 +518,10 @@ export function getPendingForContext(
     limit = 20,
     carriedGraceMs = DEFAULT_CARRIED_GRACE_MS,
     redeliverAfterMs = DEFAULT_REDELIVER_AFTER_MS,
+    redeliverCapMs = DEFAULT_REDELIVER_CAP_MS,
     now = null,
-    parUrgence = false
+    parUrgence = false,
+    sansLesCalmes = false
   } = {}
 ) {
   const adresses = (Array.isArray(recipient) ? recipient : [recipient])
@@ -435,7 +531,19 @@ export function getPendingForContext(
 
   const instant = new Date(now || nowIso()).getTime();
   const finDeGrace = new Date(instant - Number(carriedGraceMs || 0)).toISOString();
-  const finDuReService = new Date(instant - Number(redeliverAfterMs || 0)).toISOString();
+  // LA FENÊTRE PAR LETTRE (1.1.0, Tâche 8). Une seule fenêtre valait pour toutes : dix minutes,
+  // pour toujours. Elle se lit maintenant sur `reservices` : un palier par compte de rappels
+  // (`paliersDeReService`), le dernier pour ce compte et au-delà. Dans la REQUÊTE, jamais après
+  // coup : un filtre JS ferait mentir `LIMIT` et le tri par urgence (la leçon du filet du Stop).
+  // Les bornes restent des chaînes ISO comparées comme avant — aucun `julianday`, donc aucun NULL
+  // possible sur un horodatage qu'une autre implémentation aurait écrit autrement.
+  const paliers = paliersDeReService({ base: redeliverAfterMs, plafond: redeliverCapMs });
+  const clausesDeReService = paliers
+    .map((_, i) => (i === paliers.length - 1
+      ? "(COALESCE(reservices, 0) >= ? AND delivered_at <= ?)"
+      : "(COALESCE(reservices, 0) = ? AND delivered_at <= ?)"))
+    .join(" OR ");
+  const bornesDeReService = paliers.flatMap((p) => [p.rappels, new Date(instant - p.fenetreMs).toISOString()]);
   const trous = adresses.map(() => "?").join(", ");
   const tri = parUrgence
     ? `ORDER BY CASE priority
@@ -446,39 +554,32 @@ export function getPendingForContext(
          ELSE 1
        END DESC, seq ASC`
     : "ORDER BY seq ASC";
+  // `sansLesCalmes` (1.1.0) : le filet du Stop ne regarde que les lettres qui RÉVEILLENT. Une
+  // lettre calme (`sans_reveil = 1`, décidé au guichet pour une lettre de table : LOW, table ou
+  // membre en `prochain-tour`, réaction en mode direct) est servie par ce canal comme les autres
+  // — elle n'est jamais perdue —, mais elle ne retient personne. Le filtre vit dans la requête,
+  // AVANT le tri par urgence et la borne : une calme ne masque jamais une vive (même remède que
+  // `parUrgence`, jamais un filtre JS après coup).
+  const calmes = sansLesCalmes ? "AND sans_reveil = 0" : "";
   return db
     .prepare(`
       SELECT * FROM messages
       WHERE recipient IN (${trous})
         AND acked_at IS NULL
+        ${calmes}
         AND (carried_at IS NULL OR carried_at <= ?)
-        AND (delivered_at IS NULL OR delivered_at <= ?)
+        AND (delivered_at IS NULL OR ${clausesDeReService})
       ${tri}
       LIMIT ?
     `)
-    .all(...adresses, finDeGrace, finDuReService, limit);
+    .all(...adresses, finDeGrace, ...bornesDeReService, limit);
 }
 
-// UN SÉLECTEUR D'AVANT A9 — aucun appelant en production aujourd'hui (ni le
-// Facteur, ni `getPendingForContext` juste au-dessus, qui sert vraiment le
-// canal de repli). `carried_at` n'est pas un état terminal : filtrer dessus
-// rendrait invisible une lettre déjà remise mais jamais accusée — A9 mort. Le
-// Facteur ne l'utilise pas et ne doit JAMAIS l'utiliser. Elle survit par
-// Camp B (rien ne s'efface) ; ne la branchez sur aucun chemin de livraison.
-export function getPendingForCarrier(db, { recipient = null, limit = 50 } = {}) {
-  const clause = recipient ? "AND recipient = @recipient" : "";
-  return db
-    .prepare(`
-      SELECT * FROM messages
-      WHERE carried_at IS NULL
-        AND delivered_at IS NULL
-        AND acked_at IS NULL
-        ${clause}
-      ORDER BY seq ASC
-      LIMIT @limit
-    `)
-    .all(recipient ? { recipient, limit } : { limit });
-}
+// UN SÉLECTEUR D'AVANT A9 (`getPendingForCarrier`) vivait ici, sans appelant :
+// il filtrait sur `carried_at`, qui n'est pas un état terminal — réutilisé, il
+// rendait invisible une lettre remise mais jamais accusée (A9 mort). Retiré en
+// 1.1.0 (B3, passe adverse) ; l'historique git garde son code. Le canal de
+// repli est `getPendingForContext`, juste au-dessus.
 
 // « Remis au guichet, mais jamais accusé » : la seule question qui dit si une
 // lettre est vraiment arrivée à quelqu'un.
@@ -581,20 +682,28 @@ export function getPendingForMonitor(db, recipient, { limit = 50 } = {}) {
 // aussi les noms dont la chaîne d'alias mène à lui (`aliasQuiMenentA`). Une
 // lettre remise sous un alias reçoit sa ligne `alias_applique` — une seule par
 // lettre, `journaliserAlias` garde l'unicité, quel que soit le chemin.
-export function listInbox(db, recipient, { limit = 20, includeInjected = true } = {}) {
+// `apres` (1.1.0, Tâche 7, tour des réserves) : seulement les lettres dont le `seq` est plus grand —
+// le curseur que la relève sous budget de `inbox` donne quand la suite attend. Absent : rien ne change.
+export function listInbox(db, recipient, { limit = 20, includeInjected = true, apres = null, msgId = null } = {}) {
   const injectedClause = includeInjected ? "" : "AND injected_at IS NULL";
+  const apresClause = Number.isInteger(apres) ? `AND seq > ${apres}` : "";
   const noms = [recipient, ...aliasQuiMenentA(db, recipient)];
   const trous = noms.map(() => "?").join(", ");
+  // `msgId` (revue finale 2, point 1) : la lettre cherchée se filtre dans la requête elle-même,
+  // pas parmi les `limit` plus anciennes. Les règles de boîte (alias, non accusée) restent.
+  const msgClause = msgId === null ? "" : "AND msg_id = ?";
   const rows = db
     .prepare(`
       SELECT * FROM messages
       WHERE recipient IN (${trous})
         AND acked_at IS NULL
         ${injectedClause}
+        ${apresClause}
+        ${msgClause}
       ORDER BY seq ASC
       LIMIT ?
     `)
-    .all(...noms, limit);
+    .all(...noms, ...(msgId === null ? [] : [String(msgId)]), limit);
   if (noms.length > 1) {
     for (const row of rows) {
       if (row.recipient !== recipient) journaliserAlias(db, row, () => resolveRecipient(db, row.recipient), recipient);
@@ -603,20 +712,53 @@ export function listInbox(db, recipient, { limit = 20, includeInjected = true } 
   return rows;
 }
 
+// LES FORMES COURTES EN ATTENTE D'UNE CHAISE (1.1.0, Tâche 8, round 1 de la revue). Une lettre à
+// une forme courte AMBIGUË (ou que personne ne portait) garde l'adresse telle qu'écrite : en
+// majuscules, ou plus longue que huit caractères. Le repli d'une chaise doit pouvoir la relever le
+// jour où elle seule y répond (A9) — `adressesDuRepli` ③ pose ensuite la question au guichet
+// (`estPourMoi`). Ce qu'on rend : les adresses DISTINCTES de lettres non accusées
+// `<lignée>#<préfixe>` dont le préfixe, sans casse, a la forme courte (`estUneChaiseCourte`) et
+// commence la session de la chaise. La requête prend la plage exacte des adresses qui commencent
+// par `<lignée>#` (`#` ≤ … < `$`, le caractère suivant : BINARY, par l'index des destinataires) et
+// les huit premiers caractères du préfixe sans casse ; le préfixe entier se vérifie ici, en JS.
+// Une session dont le début n'est pas hexadécimal n'a pas de forme courte : rien.
+export function adressesCourtesEnAttente(db, lignee, sessionId) {
+  const nom = String(lignee || "").trim();
+  const session = String(sessionId || "").toLowerCase();
+  if (!nom || !/^[0-9a-f]{8}/.test(session)) return [];
+  const debut = `${nom}${SEPARATEUR_INSTANCE}`;
+  const finDePlage = `${nom}${String.fromCharCode(SEPARATEUR_INSTANCE.charCodeAt(0) + 1)}`;
+  const lignes = db.prepare(`
+    SELECT DISTINCT recipient FROM messages
+    WHERE recipient >= ? AND recipient < ? AND acked_at IS NULL
+      AND lower(substr(recipient, ?, 8)) = ?
+  `).all(debut, finDePlage, [...debut].length + 1, session.slice(0, 8));
+  return lignes
+    .map((ligne) => ligne.recipient)
+    .filter((adresse) => adresse.startsWith(debut) && estUneChaiseCourte(adresse)
+      && session.startsWith(adresse.slice(debut.length).toLowerCase()));
+}
+
 // LES COPIES (Run 6, Task 7, 27/09) : visibles, jamais livrées. Aucune colonne
 // de la lettre ne bouge — ni `delivered_at`, ni `injected_at`, ni `acked_at` ;
 // seule une trace `cc_vu` par CHAISE empêche la répétition. La marque est la
 // même pour les hooks, le guichet MCP et le moniteur Python : une copie vue par
 // l'un ne se redit pas par l'autre.
-export function getCopiesPourChaise(db, lignee, chaiseId, { limit = 20 } = {}) {
+// SANS COPIE (1.1.0) : une lettre d'une table FERMÉE porte `sans_copie = 1` au
+// guichet, et elle n'est une copie pour personne — ni pour une chaise sœur, ni
+// pour un client nu, ni pour le moniteur (parité `valxos_monitor.py`). Quand
+// elle attend (lignée ambiguë), elle attend sans témoin : c'est le point.
+export function getCopiesPourChaise(db, lignee, chaiseId, { limit = 20, msgId = null } = {}) {
   return db.prepare(`
     SELECT m.* FROM messages m
     WHERE m.recipient = ? AND m.acked_at IS NULL
+      AND m.sans_copie = 0
       AND NOT EXISTS (
         SELECT 1 FROM delivery_events e
         WHERE e.msg_id = m.msg_id AND e.agent_id = ? AND e.event_type = 'cc_vu'
       )
-    ORDER BY m.seq ASC LIMIT ?`).all(lignee, chaiseId, limit);
+      ${msgId === null ? "" : "AND m.msg_id = ?"}
+    ORDER BY m.seq ASC LIMIT ?`).all(lignee, chaiseId, ...(msgId === null ? [] : [String(msgId)]), limit);
 }
 
 export function marquerCopiesVues(db, rows, chaiseId, { via = null } = {}) {
@@ -626,6 +768,110 @@ export function marquerCopiesVues(db, rows, chaiseId, { via = null } = {}) {
   });
   tx(rows);
   return rows.length;
+}
+
+// L'AFFICHAGE D'UNE LETTRE (1.1.0, Tâche 4) : ce que l'en-tête montre EN PLUS des colonnes de la
+// lettre — la table (nom, mode, position), le nom humain de la chaise qui a posté
+// (`sender_chaise` → `peers.session_name`), le rappel (`reservices`, le compte des re-services
+// d'une lettre jamais accusée). Rien ne se stocke, rien ne s'invente : une table inconnue ou une
+// chaise sans nom donnent `null`. Le même objet sert les trois hooks, `inbox`/`history` (MCP),
+// `valxos-inbox` et la porte web — une seule source pour `From: alice (atelier)`.
+// UNE TABLE FERMÉE N'EST VUE QUE DE SES MEMBRES (spec A §7, la garde de `inbox`/`history` en
+// Tâche 3) : sa position ne se montre qu'à un lecteur qui en est membre ACTIF. Le lecteur est
+// `lecteur` (les adresses sous lesquelles il lit : ses formes) quand l'appelant le donne, sinon le
+// destinataire de la lettre — celui que les hooks et une boîte servent. Un membre retiré relit sa
+// lettre sans lire la position d'aujourd'hui ; le nom et le mode restent (la lettre les porte
+// déjà). Une lecture qui échoue cache la position : la garde se ferme, elle ne s'ouvre jamais.
+// UNE SEULE RÈGLE (revue T4, important 1) : la table se lit par `obtenirTable` et l'appartenance
+// par `estMembre`, les fonctions du carnet que `inbox`/`history` appellent aussi — jamais une
+// requête recopiée ici, qui ne suivrait pas le carnet quand sa règle change. Les `try/catch`
+// restent : une base sans la table `tables` (un bureau qu'une migration ratée a laissé en 6) rend
+// `null` et cache la position, jamais une exception — l'en-tête n'est pas une condition du courrier.
+export function enrichirPourAffichage(db, rows, { lecteur = null } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const formesDonnees = lecteur === null || lecteur === undefined ? null : Array.isArray(lecteur) ? lecteur : [lecteur];
+  const tables = new Map();
+  const membres = new Map();
+  const chaises = new Map();
+  const lireTable = (nom) => {
+    if (!nom) return null;
+    if (!tables.has(nom)) {
+      let table = null;
+      try {
+        table = obtenirTable(db, nom);
+      } catch {
+        table = null;
+      }
+      tables.set(nom, table);
+    }
+    return tables.get(nom);
+  };
+  const lecteurMembre = (nomTable, adresses) => {
+    const clef = [nomTable, ...adresses.map((a) => String(a ?? ""))].join("\u0000");
+    if (!membres.has(clef)) {
+      let oui = false;
+      try {
+        oui = estMembre(db, nomTable, adresses);
+      } catch {
+        oui = false;
+      }
+      membres.set(clef, oui);
+    }
+    return membres.get(clef);
+  };
+  const tableVue = (row) => {
+    const table = lireTable(row.table_nom);
+    if (!table) return null;
+    let position = table.position ?? null;
+    if (position !== null && Number(table.fermee) === 1 && !lecteurMembre(table.nom, formesDonnees ?? [row.recipient])) {
+      position = null;
+    }
+    return { nom: table.nom, mode: table.mode, position };
+  };
+  const lireChaise = (id) => {
+    if (!id) return null;
+    if (!chaises.has(id)) {
+      let nom = null;
+      try {
+        nom = getInstance(db, id)?.session_name || null;
+      } catch {
+        nom = null;
+      }
+      chaises.set(id, nom);
+    }
+    return chaises.get(id);
+  };
+  // LE RAPPEL SE LIT EN BASE (1.1.0, Tâche 8), pas sur la ligne en main : les hooks marquent
+  // (`markDelivered`, qui compte le re-service) AVANT de mettre en forme, et la ligne qu'ils
+  // tiennent date d'avant la marque — elle dirait toujours un rappel de moins, et le premier ne se
+  // nommerait jamais. Une ligne sans `seq` (forgée) fait foi d'elle-même ; une base qui ne répond
+  // pas aussi : l'en-tête n'est pas une condition du courrier.
+  let lireLeCompte = null;
+  try {
+    lireLeCompte = db.prepare("SELECT reservices FROM messages WHERE seq = ?");
+  } catch {
+    lireLeCompte = null;
+  }
+  const lireRappel = (row) => {
+    let compte = Number(row.reservices) || 0;
+    if (lireLeCompte && row.seq != null) {
+      try {
+        const frais = lireLeCompte.get(row.seq);
+        if (frais) compte = Number(frais.reservices) || 0;
+      } catch {
+        /* la ligne fait foi */
+      }
+    }
+    return compte > 0 ? compte : 0;
+  };
+  return rows.map((row) => ({
+    ...row,
+    affichage: {
+      table: tableVue(row),
+      chaise_nom: lireChaise(row.sender_chaise),
+      rappel: lireRappel(row)
+    }
+  }));
 }
 
 // La marque de livraison AVANCE à chaque service : elle ne se fige pas au premier
@@ -660,7 +906,15 @@ export function markDelivered(db, rows, agentId, eventType = "delivered", { at =
   const stamp = at || nowIso();
   const detail = acteurReel && acteurReel !== agentId ? { acteur_reel: acteurReel } : {};
   const tx = db.transaction((items) => {
-    const update = db.prepare("UPDATE messages SET delivered_at = ? WHERE seq = ?");
+    // LE COMPTE DES RE-SERVICES (1.1.0, Tâche 8) : la marque avançait déjà à chaque service ;
+    // elle compte maintenant les services au-delà du premier. `delivered_at IS NOT NULL` se lit
+    // sur la ligne D'AVANT l'écriture (SQLite évalue toute l'affectation sur l'ancienne ligne) :
+    // 0 au premier service, +1 à chacun des suivants. C'est ce compte qui espace les rappels
+    // (`getPendingForContext`, `fenetreDeReService`) et qui les nomme (`Reminder: n`, par
+    // `enrichirPourAffichage`). Le journal (`recordEvent`) ne change pas.
+    const update = db.prepare(
+      "UPDATE messages SET reservices = reservices + (delivered_at IS NOT NULL), delivered_at = ? WHERE seq = ?"
+    );
     for (const row of items) {
       update.run(stamp, row.seq);
       recordEvent(db, row.msg_id, agentId, eventType, detail);
@@ -743,8 +997,11 @@ function enService(row) {
 // une chaise en service, ou une fiche héritée d'avant les lignées (Camp B).
 // C'est exactement la question à laquelle `resolveRecipient` répond — tout ce
 // qui n'est pas `unknown` veut dire « ce nom a encore quelqu'un derrière ».
+// `distant` (relais) compte comme `unknown` : le nom vit sur l'autre Mac, et
+// personne ICI ne signe pour lui.
 function ligneeEnService(db, lignee) {
-  return resolveRecipient(db, lignee).kind !== "unknown";
+  const kind = resolveRecipient(db, lignee).kind;
+  return kind !== "unknown" && kind !== "distant";
 }
 
 // Qui a le droit de signer — et pourquoi la porte n'a pas la même largeur des
@@ -846,6 +1103,13 @@ export function droitDAccuser(db, destinataire, agentId) {
   return signataireNuVersUneChaise(db, cible, ouvert) || ouvert;
 }
 
+// Où une lettre « tenue ailleurs » est tenue, pour les deux refus qui le disent
+// (le nom nu, `nomNuTenuParUneChaise` ; la chaise sœur, `gardeDeLaCopie`) : la
+// chaise de là-bas quand on la connaît, puis son Mac.
+function ouEstTenue(chaiseId, mac) {
+  return chaiseId ? `${chaiseId}, ${mac}` : String(mac);
+}
+
 // UN SIGNATAIRE NU NE SIGNE JAMAIS VERS UNE CHAISE VIVANTE DE SESSION (fix
 // round 2 de la boucle Task 12, re-revue r1, 28/09). UNE règle, ici, pour
 // toutes les portes et toutes les formes d'adresse : un nom SANS `#` (une
@@ -875,10 +1139,18 @@ function signataireNuVersUneChaise(db, cible, verdict) {
 // et ses lettres TENUES sont les plus précieuses. Rend la raison du refus, ou
 // null. Exportée : le guichet MCP (inbox et history d'un appelant sans chaise)
 // et `valxos-inbox` (acteur nu) la posent aussi, jamais une deuxième règle.
+// R14 (relais) : une chaise de l'AUTRE Mac est une chaise de session comme une
+// autre. Une adresse que la résolution rend `distant` (la lignée tenue là-bas,
+// une chaise qui vit là-bas) n'appartient à aucun nom nu d'ici : accusée ici,
+// la lettre ne serait jamais portée (le paquet ne prend que les lettres non
+// accusées) — une lettre perdue sans un bruit.
 export function nomNuTenuParUneChaise(db, adresse, nom = adresse) {
   const acteur = String(nom ?? "").trim();
   if (!acteur || acteur.includes(SEPARATEUR_INSTANCE)) return null;
   const resolution = resolveRecipient(db, String(adresse ?? ""));
+  if (resolution.kind === "distant") {
+    return `lineage letter held elsewhere (tenue-ailleurs): this address leads to a chair on the other Mac (${ouEstTenue(resolution.chaise_id, resolution.mac)}). A signer without a chair (a bare name) holds only a copy here: the relay carries the letter there, and it is acknowledged there`;
+  }
   const chaises = (resolution.targets || []).filter((t) => t?.instance_session_id && t.id !== acteur);
   // Ceinture (N1) : une chaise marquée `offline` dont le processus est encore
   // la MÊME incarnation (heure de naissance qui correspond) tient toujours la
@@ -1030,16 +1302,37 @@ function gardeDeLaCopie(db, destinataire, verdict) {
   // d'adresse : `signataireNuVersUneChaise` (fix round 2).
   if (!verdict.autorise || verdict.raison !== RAISON_CHAISE_DE_LA_LIGNEE) return verdict;
   const chaise = getInstance(db, verdict.signataire);
-  const decision = deciderLaCopie({
+  const resolution = resolveRecipient(db, destinataire);
+  const decision = deciderLaCopieAuRegistre(db, {
     lignee: String(destinataire ?? ""),
     sessionId: chaise?.instance_session_id || null,
-    resolution: resolveRecipient(db, destinataire)
+    resolution,
+    pidDeMaChaise: chaise?.pid ?? null
   });
   if (!decision.copie) return verdict;
+  // TENUE AILLEURS (relais) : la désignée de l'autre Mac tient la lignée. Aucune
+  // chaise d'ici ne signe sa lettre — le relais la porte là-bas, et c'est
+  // là-bas qu'elle s'accuse.
+  if (decision.raison === "cc-distant") {
+    return {
+      autorise: false,
+      signataire: verdict.signataire,
+      raison: `lineage letter held elsewhere (tenue-ailleurs): the lineage is held by a chair on the other Mac (${ouEstTenue(decision.chaise_designee, resolution.mac)}); the relay carries the letter there, and this chair holds only a copy`
+    };
+  }
   const raison = decision.sans_chaise_designee
     ? "lineage letter held (sans-chaise-designee): no designated chair holds it as its own. Designate a chair (valxos-chaise designer), or harvest (valxos-chaise moissonner) if only one live chair remains"
     : `cc copy: the lineage's letter belongs to the designated chair (${decision.chaise_designee}); this chair holds only a copy`;
   return { autorise: false, signataire: verdict.signataire, raison };
+}
+
+// LE DROIT DE SIGNER UNE LETTRE, sans rien écrire : la question qu'`ackMessage`
+// pose avant d'accuser (`droitDAccuser`, puis la garde de la copie cc). Exportée
+// pour `reply` (1.1.0) : on ne répond « en destinataire » qu'à une lettre qu'on
+// aurait le droit de signer — une copie cc ne se répond pas. Une règle, deux
+// gestes, jamais deux règles.
+export function droitDeSigner(db, destinataire, agentId) {
+  return gardeDeLaCopie(db, destinataire, droitDAccuser(db, destinataire, agentId));
 }
 
 // `at` est l'horloge du geste, et elle s'injecte comme celle des deux autres
@@ -1053,7 +1346,7 @@ export function ackMessage(db, msgId, agentId, { at = null } = {}) {
   const row = getMessageById(db, msgId);
   if (!row) return null;
 
-  const verdict = gardeDeLaCopie(db, row.recipient, droitDAccuser(db, row.recipient, agentId));
+  const verdict = droitDeSigner(db, row.recipient, agentId);
   if (!verdict.autorise) {
     // Le refus NE MODIFIE RIEN : la lettre garde son `acked_at` nul, donc son
     // droit au retour (A9). Il n'est pas muet non plus — un refus qu'on ne peut
@@ -1223,37 +1516,87 @@ function borneDuNom(db, nom) {
   }
 }
 
-export function history(db, { self, peer, thread_id = null, limit = 50 } = {}) {
-  const moi = String(self || "").trim();
-  if (!moi) return [];
-  const borne = borneDuNom(db, moi);
+// S14 (troisième passe adverse) : QUI LIT UNE LETTRE FERMÉE DANS L'HISTORIQUE. Une lettre d'une
+// table fermée, ou qui en porte la discrétion (`sans_copie = 1` : une lettre de table fermée, ou une
+// réponse directe à l'une d'elles), ne se rend qu'à :
+//   · sa chaise expéditrice (`sender_chaise`), ou son expéditeur quand aucune chaise n'est posée ;
+//   · un membre de sa table, sous l'une de ses formes (une table qui inscrit la LIGNÉE ouvre la lettre
+//     à chacune de ses chaises) ;
+//   · son destinataire — et, pour une adresse de lignée lue par une chaise, la chaise qui a le droit
+//     de la signer (`droitDeSigner` : une chaise sœur n'en a qu'une copie, qu'une lettre `sans_copie`
+//     ne donne pas).
+// Une chaise non membre ne la lit donc plus en rabattant sa chaise à la lignée. Toute autre lettre se
+// lit comme en 1.0.0 : une lignée relit le courrier de ses chaises.
+export function lisibleDansLHistorique(db, row, { formes = [], chaise = null } = {}) {
+  const table = row.table_nom ? obtenirTable(db, row.table_nom) : null;
+  const fermee = Number(row.sans_copie) === 1 || Number(table?.fermee) === 1;
+  if (!fermee) return true;
+  if (formes.includes(row.sender_chaise || row.sender)) return true;
+  if (table && estMembre(db, table.nom, formes)) return true;
+  if (!formes.includes(row.recipient)) return false;
+  if (!chaise || row.recipient === chaise) return true;
+  return droitDeSigner(db, row.recipient, chaise).autorise === true;
+}
+
+// `lecteur` ({ formes, chaise }), quand il est donné, omet ce que ce lecteur ne lit pas
+// (`lisibleDansLHistorique`) : la ligne n'est pas rendue, et le compte ne la compte pas.
+export function history(db, { self, peer, thread_id = null, table_nom = null, envoi_id = null, limit = 50, lecteur = null } = {}) {
+  const lignes = lignesDeLHistorique(db, { self, peer, thread_id, table_nom, envoi_id, limit });
+  return lecteur ? lignes.filter((row) => lisibleDansLHistorique(db, row, lecteur)) : lignes;
+}
+
+// `self` : un nom, ou les noms d'UN lecteur (S19 : la lignée et la chaise d'une chaise, qui relit
+// ce qui est à l'une ou à l'autre et ce qu'elle a posté sous l'une ou l'autre). La borne d'un alias
+// est celle du premier nom.
+function lignesDeLHistorique(db, { self, peer, thread_id, table_nom, envoi_id, limit }) {
+  const noms = [...new Set([self].flat().map((nom) => String(nom || "").trim()).filter(Boolean))];
+  if (noms.length === 0) return [];
+  const borne = borneDuNom(db, noms[0]);
   const apres = borne ? " AND created_at > ?" : "";
   const avecBorne = (...valeurs) => (borne ? [...valeurs, borne] : valeurs);
+  const trous = noms.map(() => "?").join(", ");
+  const aMoi = `(sender IN (${trous}) OR recipient IN (${trous}))`;
+
+  // 1.1.0 — LE FIL D'UN ENVOI OU D'UNE TABLE, SOUS LA MÊME BORNE (G1, F8). Un
+  // envoi ou une table ne s'ouvrent que par qui y figure comme expéditeur ou
+  // destinataire : la requête porte le nom, jamais la table entière, et la
+  // borne d'un alias vaut ici comme pour un fil. `envoi_id` prime (il est plus
+  // étroit), puis `table_nom`, puis le fil, puis le pair, puis tout.
+  if (envoi_id) {
+    return db
+      .prepare(`SELECT * FROM messages WHERE envoi_id = ? AND ${aMoi}${apres} ORDER BY seq DESC LIMIT ?`)
+      .all(...avecBorne(envoi_id, ...noms, ...noms), limit);
+  }
+  if (table_nom) {
+    return db
+      .prepare(`SELECT * FROM messages WHERE table_nom = ? AND ${aMoi}${apres} ORDER BY seq DESC LIMIT ?`)
+      .all(...avecBorne(table_nom, ...noms, ...noms), limit);
+  }
 
   if (thread_id) {
     return db
       .prepare(`
         SELECT * FROM messages
-        WHERE thread_id = ? AND (sender = ? OR recipient = ?)${apres}
+        WHERE thread_id = ? AND ${aMoi}${apres}
         ORDER BY seq DESC
         LIMIT ?
       `)
-      .all(...avecBorne(thread_id, moi, moi), limit);
+      .all(...avecBorne(thread_id, ...noms, ...noms), limit);
   }
   if (peer) {
     return db
       .prepare(`
         SELECT * FROM messages
-        WHERE ((sender = ? AND recipient = ?)
-           OR (sender = ? AND recipient = ?))${apres}
+        WHERE ((sender IN (${trous}) AND recipient = ?)
+           OR (sender = ? AND recipient IN (${trous})))${apres}
         ORDER BY seq DESC
         LIMIT ?
       `)
-      .all(...avecBorne(moi, peer, peer, moi), limit);
+      .all(...avecBorne(...noms, peer, peer, ...noms), limit);
   }
   return db
-    .prepare(`SELECT * FROM messages WHERE (sender = ? OR recipient = ?)${apres} ORDER BY seq DESC LIMIT ?`)
-    .all(...avecBorne(moi, moi), limit);
+    .prepare(`SELECT * FROM messages WHERE ${aMoi}${apres} ORDER BY seq DESC LIMIT ?`)
+    .all(...avecBorne(...noms, ...noms), limit);
 }
 
 export function recordEvent(db, msgId, agentId, eventType, detail = {}) {

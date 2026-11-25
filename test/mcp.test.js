@@ -11,7 +11,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { insertMessage, openDatabase } from "../src/lib/database.js";
 import { deposerAncienNom, designatePrimary, registerInstance } from "../src/lib/registry.js";
 import { procStartOf } from "../src/lib/postbox.js";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { envPropre, poserLeBureau } from "./aide-env.js";
 
 // ⚠️ LE JETABLE VAUT AUSSI POUR CE PROCESSUS-CI (revue adverse F2, 21/08). Un `file`
@@ -88,9 +88,10 @@ test("MCP stdio server registers, sends, reads, and acks messages — chaque por
       name: "history",
       arguments: { self: "mcp-b", peer: "mcp-a" }
     });
+    // S-codes (cinquième passe) : à `history`, un `self` déclaré refusé rend toujours `identite-refusee`.
     assert.equal(
       JSON.parse(historyIntrus.content[0].text).refus,
-      "releve-refusee",
+      "identite-refusee",
       "l'intrus ne lit pas non plus l'historique d'autrui"
     );
 
@@ -214,7 +215,7 @@ test("une lignée SANS fiche ne relève, n'accuse ni ne relit sous une chaise d�
       arguments: { self: chaise, peer: "etranger", limit: 5 }
     });
     const historyFamilleJson = JSON.parse(historyFamille.content[0].text);
-    assert.equal(historyFamilleJson.refus, "releve-refusee", "l'historique d'une chaise vivante n'est pas lu par un nom nu");
+    assert.equal(historyFamilleJson.refus, "identite-refusee", "l'historique d'une chaise vivante n'est pas lu par un nom nu (S-codes : identite-refusee)");
     assert.equal(historyFamilleJson.messages, undefined);
 
     // Et un « voisin » réel (ni la lignée, ni sa chaise) ne le peut pas : la
@@ -424,7 +425,7 @@ test("27/09 fix 1 — serveur MCP AVEC fiche, une AUTRE chaise désignée : inbo
   const { root, maison, ouvrir } = bureauMcp("cc2cc-v2-mcp-fiche-b-");
   ficheDuRunner(maison, "INST");
   const db = ouvrir();
-  registerInstance(db, { lineage: "lignee-t", sessionId: "ALPHA", pid: process.pid });
+  registerInstance(db, { lineage: "lignee-t", sessionId: "ALPHA", pid: process.ppid });
   registerInstance(db, { lineage: "lignee-t", sessionId: "INST", pid: process.pid, house: maison });
   designatePrimary(db, "lignee-t", "ALPHA");
   const lettre = insertMessage(db, { sender: "bob-eternal", recipient: "lignee-t", body: "pour la chaise désignée" });
@@ -505,22 +506,25 @@ test("27/09 fix 2 (F3 28/09) — fiche présente mais chaise tenue par un AUTRE 
 
 // ── ALWAYSLOAD (1.0.0) ───────────────────────────────────────────────────────
 // Claude Code ≥ 2.1.287 diffère les outils MCP derrière la recherche d'outils.
-// Les hooks et les skills demandent au modèle d'appeler `inbox`, `send` et
-// `ack` sans détour : seuls ces trois-là portent la marque ; les six autres
-// restent différables, et un outil de plus marqué par mégarde se verrait ici.
-test("tools/list : inbox, send et ack portent _meta anthropic/alwaysLoad, les six autres non", async () => {
+// Les hooks et les skills demandent au modèle d'appeler `inbox`, `send`, `ack`
+// et, depuis la 1.1.0, `reply` sans détour : seuls ces quatre-là portent la
+// marque ; les neuf autres restent différables, et un outil de plus marqué par
+// mégarde se verrait ici.
+test("tools/list : inbox, send, ack et reply portent _meta anthropic/alwaysLoad, les neuf autres non", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc2cc-v2-mcp-alwaysload-"));
   const c = await connecter(root, "always-load");
   try {
     const { tools } = await c.listTools();
     const parNom = new Map(tools.map((tool) => [tool.name, tool]));
-    const toujoursCharges = ["inbox", "send", "ack"];
-    const differables = ["whoami", "register", "list_peers", "unregister", "broadcast", "history"];
+    // 1.1.0 : `reply` rejoint les outils que les hooks et les skills demandent
+    // sans détour ; `tables`, `table_manage` et `envoi_status` restent différables.
+    const toujoursCharges = ["inbox", "send", "ack", "reply"];
+    const differables = ["whoami", "register", "list_peers", "unregister", "broadcast", "history", "tables", "table_manage", "envoi_status"];
 
     assert.deepEqual(
       [...parNom.keys()].sort(),
       [...toujoursCharges, ...differables].sort(),
-      "SONDE IMPOSSIBLE sinon : la liste d'outils n'est plus les neuf attendus"
+      "SONDE IMPOSSIBLE sinon : la liste d'outils n'est plus les treize attendus"
     );
     for (const nom of toujoursCharges) {
       assert.equal(parNom.get(nom)._meta?.["anthropic/alwaysLoad"], true, `${nom} est toujours chargé`);
@@ -603,5 +607,37 @@ test("J1 — send avec from = l'adresse humaine ou un ancien nom de l'appelant :
     assert.deepEqual(lignes("J1 diffusion").map((l) => l.sender), ["lignee-t#ALPHA"], "la diffusion part de la chaise");
   } finally {
     await c.close();
+  }
+});
+
+// S10 (seconde passe adverse) — AUCUNE IDENTITÉ QUE LA 1.0.0 ACCEPTAIT NE CHANGE. La sonde : une base
+// 1.0.0 avec la fiche et une lettre de `alice opus` ; le serveur lancé sous `VALXOS_SELF='alice opus'`
+// la relève (la normalisation d'A3 en faisait `alice_opus`, boîte vide). Une partie de plus de 64
+// caractères, ou une lignée vide, refuse le démarrage, la limite dite : jamais un nom coupé.
+const appeler = async (client, name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+test("S10 — VALXOS_SELF='alice opus' reste alice opus au serveur MCP et relève sa lettre 1.0.0 ; 65 caractères ou #foo : le serveur refuse de démarrer (identite-invalide)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc2cc-v2-mcp-s10-"));
+  const db = openDatabase({ file: path.join(root, "broker.db") });
+  insertMessage(db, { msg_id: "s10-ancienne", sender: "bob", recipient: "alice opus", body: "a 1.0.0 letter" });
+  db.close();
+  const alice = await connecter(root, "alice opus");
+  try {
+    assert.equal((await appeler(alice, "whoami")).id, "alice opus");
+    const boite = await appeler(alice, "inbox", { mark_delivered: false });
+    assert.deepEqual(boite.messages.map((m) => m.msg_id), ["s10-ancienne"], "la lettre de la 1.0.0 se relève");
+  } finally {
+    await alice.close();
+  }
+  for (const [nom, motif] of [["a".repeat(65), /65 characters long; 64 at most/], ["#foo", /lineage is empty/], [`alice#${"s".repeat(70)}`, /70 characters long/]]) {
+    const r = spawnSync(process.execPath, [path.join(repo, "src/mcp-server/server.js")], {
+      input: "",
+      encoding: "utf8",
+      timeout: 10000,
+      env: { ...envPropre(), CC2CC_V2_HOME: root, CC2CC_GARDE_BUREAU: "1", CC2CC_SELF: nom }
+    });
+    assert.equal(r.status, 1, `${nom.slice(0, 20)} : ${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /refusing to start: .*\(identite-invalide\)/);
+    assert.match(r.stderr, motif);
+    assert.doesNotMatch(r.stderr, /\n\s+at /, "une phrase, jamais une pile");
   }
 });

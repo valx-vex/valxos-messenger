@@ -5,6 +5,8 @@
 // cli-args.js : la porte web l'importe sans le patron de sortie ci-dessous.
 // Les binaires continuent d'importer d'ici.
 export { parseArgs } from "./cli-args.js";
+import fs from "node:fs";
+import { deriveSelf } from "../lib/config.js";
 
 // Un drapeau donné SANS valeur (le dernier de la ligne, ou suivi d'un autre
 // drapeau) devient `true` dans parseArgs — EXACTEMENT la même forme qu'un
@@ -35,6 +37,21 @@ export function requireArg(args, key) {
 export function optionalArg(args, key) {
   refuserSiValeurManquante(args, key);
   return args[key];
+}
+
+// S10 (seconde passe adverse) : l'identité dérivée que ce paquet ne prend pas
+// (une partie de plus de 64 caractères, une lignée vide — config.js,
+// `motifDIdentiteInvalide`) se refuse AU DÉMARRAGE, avant d'ouvrir le bureau :
+// une phrase sur stderr (écriture synchrone : rien ne se perd dans un tube),
+// sortie 2, rien de fait. Jamais un nom coupé ou réécrit en silence, jamais une pile.
+export function deriveSelfOuRefus(outil) {
+  try {
+    return deriveSelf();
+  } catch (erreur) {
+    if (erreur?.code !== "identite-invalide") throw erreur;
+    fs.writeSync(2, `${outil}: refusing to start: ${erreur.message} (identite-invalide). Nothing was done.\n`);
+    process.exit(2);
+  }
 }
 
 export function printJson(value) {

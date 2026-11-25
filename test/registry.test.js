@@ -20,7 +20,6 @@ import {
   ackMessage,
   getCarriedUnacked,
   listPeers,
-  getPendingForCarrier,
   getPendingForContext,
   initSchema,
   insertMessage,
@@ -585,8 +584,13 @@ test("une lettre non accusée revient AU PLUS UNE FOIS par fenêtre, pas à chaq
     "re-servie une fois, puis elle se tait : un doublon (A8), jamais une avalanche");
 
   // …et elle revient bien à la fenêtre SUIVANTE : on borne le retour, on ne l'éteint pas.
+  // 1.1.0 (Tâche 8) : la fenêtre suivante est DEUX fois plus longue — vingt minutes après le
+  // rappel de la minute 11, donc à la minute 31 — et ainsi de suite jusqu'au plafond d'une heure
+  // (test/rappels.test.js). Les rappels s'espacent, ils ne cessent jamais.
+  assert.deepEqual(getPendingForContext(db, "bob", { now: instant(30) }), [],
+    "le deuxième rappel attend vingt minutes, pas dix : les rappels s'espacent (A8)");
   assert.deepEqual(
-    getPendingForContext(db, "bob", { now: instant(22) }).map((r) => r.msg_id), ["L1"],
+    getPendingForContext(db, "bob", { now: instant(31) }).map((r) => r.msg_id), ["L1"],
     "acked_at nul ⇒ la lettre finit toujours par revenir — à la fenêtre d'après (A9)");
 });
 
@@ -632,16 +636,13 @@ test("les deux fenêtres du repli sont des réglages, jamais des nombres en dur"
   assert.ok(DEFAULT_REDELIVER_AFTER_MS > 0);
 });
 
-test("le Facteur ne ramasse que ce qui n'a été ni remis, ni livré, ni accusé", (t) => {
-  const db = migratedDb(t);
-  const a = insertMessage(db, { msg_id: "A", sender: "s", recipient: "bob", body: "1" });
-  const b = insertMessage(db, { msg_id: "B", sender: "s", recipient: "bob", body: "2" });
-  const c = insertMessage(db, { msg_id: "C", sender: "s", recipient: "bob", body: "3" });
-  insertMessage(db, { msg_id: "D", sender: "s", recipient: "bob", body: "4" });
-  markCarried(db, [a], "facteur");
-  markDelivered(db, [b], "bob");
-  ackMessage(db, c.msg_id, "bob");
-  assert.deepEqual(getPendingForCarrier(db).map((r) => r.msg_id), ["D"]);
+// B3 (passe adverse) : le sélecteur d'avant A9 (`getPendingForCarrier`, « ni remis, ni livré, ni
+// accusé ») n'avait plus d'appelant et filtrait sur `carried_at` — réutilisé, il rendait invisible
+// une lettre remise jamais accusée. Il n'est plus exporté ; git garde son code.
+test("B3 — database.js n'exporte plus le sélecteur d'avant A9 (getPendingForCarrier)", async () => {
+  const database = await import("../src/lib/database.js");
+  assert.equal(Object.hasOwn(database, "getPendingForCarrier"), false);
+  assert.equal(typeof database.getPendingForContext, "function", "sonde impossible sinon : le module se lit");
 });
 
 // --- L'identité : touchSelf enregistre une instance, pas une fiche de maison ---
@@ -923,6 +924,31 @@ test("la moisson laisse en service la chaise dont le processus tourne encore", (
   assert.equal(
     db.prepare("SELECT status FROM peers WHERE instance_session_id = 's-vivante'").get().status,
     "active"
+  );
+});
+
+// LA MOISSON ÉCARTE LES CHAISES CODEX, ET ELLES SEULES (vague finale, 21/11). Le filtre disait
+// « toute chaise qui a une porte » (`porteDeLaChaise(chaise) === null`) ; il dit maintenant
+// « toute chaise qui n'est pas Codex ». Aucun changement aujourd'hui (`porteDeLaChaise` ne
+// reconnaît que Codex) ; la porte Hermes de la 1.2.0 pourra étendre `porteDeLaChaise` sans
+// faire sortir de la moisson une chaise qui n'a pas de fiche Codex pour la moissonner.
+test("la moisson écarte les chaises Codex seulement : une ligne d'un autre harnais (hermes) à pid mort est moissonnée", (t) => {
+  const db = migratedDb(t);
+  const mort = pidMort();
+  const hermes = registerInstance(db, { lineage: "alice", sessionId: "s-harnais-hermes", pid: mort });
+  const codex = registerInstance(db, { lineage: "bob", sessionId: "s-harnais-codex", pid: mort });
+  const poser = db.prepare("UPDATE peers SET metadata_json = ? WHERE id = ?");
+  poser.run(JSON.stringify({ harnais: "hermes", porte: "socket" }), hermes.id);
+  poser.run(JSON.stringify({ harnais: "codex", porte: "cli" }), codex.id);
+
+  const res = reapDeadPeers(db);
+
+  assert.deepEqual(res.moissonnees.map((r) => r.id), [hermes.id], "la ligne hermes est moissonnée, la ligne Codex non");
+  assert.equal(db.prepare("SELECT status FROM peers WHERE id = ?").get(hermes.id).status, "dead");
+  assert.equal(
+    db.prepare("SELECT status FROM peers WHERE id = ?").get(codex.id).status,
+    "active",
+    "une chaise Codex se moissonne à sa fiche (valxos-doctor --reap), comme avant"
   );
 });
 
@@ -1306,13 +1332,13 @@ test("cc2cc-doctor vérifie TOUS les liens de `bin` — l'alias oublié et la co
   ).stdout);
 
   const sain = lancer();
-  assert.equal(COMMANDES_DU_PRODUIT.length, 22, "SONDE : le manifeste publie bien 22 commandes");
+  assert.equal(COMMANDES_DU_PRODUIT.length, 27, "SONDE : le manifeste publie bien 27 commandes (valxos-relais compris)");
   assert.deepEqual(
     Object.keys(sain.checks.cliCommands).sort(),
     [...COMMANDES_DU_PRODUIT].sort(),
     "le médecin nomme exactement les liens que l'installeur pose, ni plus ni moins"
   );
-  assert.equal(sain.ok, true, "les 22 liens exécutables : le cas sain reste vert");
+  assert.equal(sain.ok, true, "les 27 liens exécutables : le cas sain reste vert");
 
   for (const manquant of ["cc2cc-send", "valxos-messenger"]) {
     fs.rmSync(path.join(binDir, manquant));

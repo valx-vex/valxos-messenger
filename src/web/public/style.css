@@ -296,6 +296,18 @@ body::before {
   margin: 0 0 5px;
 }
 
+/* La ligne de table (1.1.0) : sous l'en-tête, dans le registre mono de la
+   ligne d'expéditeur — c'est une métadonnée du pli, pas son texte. Même encre
+   que `.pli__de` : la palette est celle de la maquette, on n'y ajoute rien. */
+.pli__table {
+  font-family: "DM Mono", ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  color: #4B5563;
+  line-height: 1.3;
+  margin: 0 0 5px;
+  overflow-wrap: anywhere;
+}
+
 .pli__corps {
   font-size: 15px;
   line-height: 1.6;

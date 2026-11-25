@@ -22,6 +22,7 @@
 // release. Un bump de version passe par ici, et entraîne le verrou npm, le
 // manifeste du plugin et le CHANGELOG dans le même geste.
 import test from "node:test";
+import { envPropre } from "./aide-env.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -35,10 +36,11 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const lireJson = (relatif) => JSON.parse(fs.readFileSync(path.join(repo, relatif), "utf8"));
 const pkg = lireJson("package.json");
 
-// La release est `1.0.0` : rc.3 promu tel quel le 26/09/2026 (package.json et
-// le verrou l'ont suivie ce jour-là ; le manifeste du plugin et le CHANGELOG
-// ont suivi le 27/09, Run 6). Une seule version, partout.
-const VERSION_ATTENDUE = "1.0.0";
+// La release est `1.1.0` (22/10/2026) : les tables, `reply`, les règles de
+// calme, la sonnette Codex. La 1.0.0 (18/10/2026) reste la première release
+// publique ; les tests plus bas gardent son entrée du CHANGELOG telle quelle.
+// Une seule version, partout.
+const VERSION_ATTENDUE = "1.1.0";
 const DEPOT_PUBLIC = "https://github.com/valx-vex/valxos-messenger";
 
 // Ce qui DOIT partir — chaque entrée existe dans l'arbre.
@@ -103,7 +105,7 @@ function npm(args, options = {}) {
     encoding: "utf8",
     cwd: repo,
     env: {
-      ...process.env,
+      ...envPropre(),
       npm_config_dry_run: "false",
       npm_config_update_notifier: "false",
       npm_config_fund: "false",
@@ -341,7 +343,7 @@ test("la liste blanche `files` ne nomme que ce qui existe et doit partir, et cou
 
 test("chaque commande de `bin` existe, porte son shebang, et est exécutable dans l'index git", () => {
   const cibles = [...new Set(Object.values(pkg.bin))];
-  assert.equal(Object.keys(pkg.bin).length, 22, "22 points d'entrée publiés (README)");
+  assert.equal(Object.keys(pkg.bin).length, 27, "27 points d'entrée publiés (README ; le 27e, valxos-relais, est venu après le [1.1.0])");
 
   const index = spawnSync("git", ["ls-files", "-s", "--", ...cibles], { cwd: repo, encoding: "utf8" });
   const modes = new Map();
@@ -433,6 +435,9 @@ test("npm pack --dry-run emporte le serveur, chaque commande, les docs et le plu
     ".claude-plugin/plugin.json", "hooks/hooks.json", "monitors/monitors.json", "mcp.json",
     "skills/chaise/SKILL.md", "skills/messaging/SKILL.md",
     "src/hooks/startup_sync.js", "src/hooks/piggyback_fetch.js", "src/hooks/safety_net_poll.js",
+    "src/hooks/codex/codex-hook.js", "src/hooks/codex/harness-common.js",
+    "src/lib/chaise-codex.js", "src/lib/sonnette.js",
+    "scripts/codex/hooks.template.json", "scripts/codex/codex-setup.js",
     "src/web/serveur.js", "src/web/public/index.html"
   ];
   for (const attendu of attendus) assert.ok(chemins.includes(attendu), `le tarball emporte ${attendu}`);
@@ -551,7 +556,7 @@ test("le point d'entrée un-clic s'exécute depuis un tarball extrait — avec e
     assert.equal(verdict.ok, true, `${nom} : le cœur de l'installation serait vert`);
     assert.equal(verdict.mode, "dry-run", `${nom} : le mode est dit`);
     assert.equal(fs.realpathSync(verdict.repo), fs.realpathSync(paquet), `${nom} : l'installeur travaille depuis le paquet extrait, pas depuis le dépôt`);
-    assert.equal(verdict.cliLinks.length, 22, `${nom} : les 22 commandes seraient liées`);
+    assert.equal(verdict.cliLinks.length, 27, `${nom} : les 27 commandes seraient liées`);
     for (const lien of verdict.cliLinks) {
       assert.ok(lien.link.startsWith(home), `${nom} : le lien ${lien.name} viserait le faux HOME`);
       assert.ok(fs.existsSync(lien.source), `${nom} : la source du lien ${lien.name} existe dans le paquet`);
@@ -709,4 +714,72 @@ test("le [1.0.0] du CHANGELOG dit la vague finale : Added, Fixed, et la garde pr
     "The npm package never carries Python bytecode (`__pycache__/`), which held absolute source paths.",
     "Long help and error texts are no longer cut when piped (`valxos-chaise -h | less`)."
   ]) assert.ok(parSection.get("Fixed").includes(ligne), `Fixed : ${ligne.slice(0, 60)}…`);
+});
+
+// 1.1.0 (22/10/2026) — LE [1.1.0] DU CHANGELOG PRÉCÈDE LE [1.0.0], porte sa
+// date, les cinq sections de Keep a Changelog dans l'ordre (celles de la
+// 1.0.0), et les lignes des trois chantiers (les tables, le calme, la sonnette
+// Codex). L'oracle des faits reste l'arbre : ce qu'une ligne nomme existe. La
+// date est écrite en dur, comme celle du [1.0.0] : elle change avec le commit
+// de release, pas toute seule.
+const DATE_1_1_0 = "2026-11-25";
+
+test("le [1.1.0] du CHANGELOG : daté, premier, cinq sections dans l'ordre, les trois chantiers nommés, les fichiers qu'il cite existent", () => {
+  const changelog = fs.readFileSync(path.join(repo, "CHANGELOG.md"), "utf8");
+  assert.match(changelog, new RegExp(`^## \\[1\\.1\\.0\\] — ${DATE_1_1_0}$`, "m"), `l'en-tête est exactement « ## [1.1.0] — ${DATE_1_1_0} »`);
+  const titres = [...changelog.matchAll(/^## \[([^\]]+)\]/gm)].map((m) => m[1]);
+  assert.deepEqual(titres.slice(0, 2), ["1.1.0", "1.0.0"], "le [1.1.0] précède le [1.0.0], sans [Unreleased] devant");
+  const debut = changelog.indexOf("## [1.1.0]");
+  const fin = changelog.indexOf("\n## [", debut + 1);
+  const entree = changelog.slice(debut, fin);
+  const chapeau = entree.split("\n### ")[0].replace(/\s+/g, " ");
+  assert.doesNotMatch(entree.replace(/\s+/g, " "), /no longer returns after every tool call/, "la 1.0.0 revenait toutes les dix minutes (finding 2)");
+  for (const fait of ["Schema 6 → 8, additive only", "no new dependency", "zod's floor rises to 4.5"]) assert.ok(chapeau.includes(fait), `le chapeau dit : ${fait}`);
+  const parSection = new Map(entree.split(/\n### /).slice(1).map((s) => {
+    const [titre, ...reste] = s.split("\n");
+    return [titre.trim(), reste.join("\n").replace(/\s+/g, " ")];
+  }));
+  assert.deepEqual([...parSection.keys()], ["Added", "Changed", "Deprecated", "Fixed", "Known limitations"], "les sections du [1.1.0], dans l'ordre de Keep a Changelog");
+  for (const fait of [
+    "`table:<name>`", "`envoi_id`", "`prochain-tour`", "`sans_copie`", "`refus: \"hors-enclos\"`", "`hors_enclos: true`", "`table-sous-enclos`",
+    "MCP `reply` (always loaded)", "`tables`", "`table_manage`", "`envoi_status`", "`tournee: { state, reason, at }`",
+    "`Table: <name> (<mode>) · position: \"<text>\"`", "`From: <sender> (<chair name>)`", "`Reminder: <n>`",
+    "`valxos-table`", "`valxos-history`", "27 CLI entry points", "`valxos-send --to table:<name>`",
+    "`a: \"table:<name>\"`", "`name#<prefix>`", "`envoi-interrompu`",
+    "`src/hooks/codex/codex-hook.js`", "`src/facteur/porte-codex.js`", "`codex queue --thread <id> --message <envelope>`",
+    "`sonnette-codex-impossible`", "`codex://threads/<uuid>`", "`VALXOS_CODEX_OUVRIR_APP=0`", "`VALXOS_CODEX_PORTE`", "The envelope never carries a body.",
+    "`valxos-messenger install --codex --self <name>", "`scripts/codex/hooks.template.json`", "`valxos-doctor` has a `codex` section", "`porte`"
+  ]) assert.ok(parSection.get("Added").includes(fait), `Added : ${fait}`);
+  for (const fait of ["Schema 7", "`reservices`", "`Reminder: <n>`", "where 1.0.0 brought it back every 10 minutes", "once per session", "never HTML-escaped", "`checked`", "`^4.5.0`"]) {
+    assert.ok(parSection.get("Changed").includes(fait), `Changed : ${fait}`);
+  }
+  assert.ok(parSection.get("Deprecated").includes("`cc2cc-table` and `cc2cc-history`") && parSection.get("Deprecated").includes("27 entry points in all"), "Deprecated : les deux alias neufs, 27 points d'entrée");
+  for (const fait of ["`VALXOS_GARDE_BUREAU`", "`CC2CC_GARDE_BUREAU`"]) assert.ok(parSection.get("Fixed").includes(fait), `Fixed : ${fait}`);
+  for (const fait of ["Escape", "iPhone", "not a security boundary", "stand-in `codex`", "`/hooks`", "One Codex chair card per lineage", "`reply` is marked always-load", "whose door is `app`", "`setsid`"]) {
+    assert.ok(parSection.get("Known limitations").includes(fait), `Known limitations : ${fait}`);
+  }
+  // Ce que le [1.1.0] nomme existe ; le schéma est bien 8 ; 27 points d'entrée ;
+  // le plancher de zod est celui du manifeste, du verrou, et la version verrouillée le tient.
+  for (const chemin of ["src/lib/tables.js", "src/lib/sonnette.js", "src/facteur/porte-codex.js", "src/hooks/codex/codex-hook.js", "scripts/codex/hooks.template.json", "src/bin/valxos-table.js", "src/bin/valxos-history.js", "src/lib/historique.js", "src/lib/chaise-codex.js"]) {
+    assert.ok(fs.existsSync(path.join(repo, chemin)), `${chemin} existe`);
+  }
+  assert.match(fs.readFileSync(path.join(repo, "src/lib/migrations.js"), "utf8"), /^export const SCHEMA_VERSION = 8;$/m, "le schéma est 8");
+  assert.equal(Object.keys(pkg.bin).length, 27, "27 points d'entrée : les 26 du CHANGELOG, plus valxos-relais");
+  assert.ok(pkg.bin["cc2cc-table"] && pkg.bin["cc2cc-history"], "les deux alias neufs sont publiés");
+});
+
+// 1.1.0 — LE PLANCHER DE ZOD. `table_manage` borne la position par
+// `z.string().max(120)` ; zod compte des points de code à partir de 4.5
+// (4.4.3 comptait des unités UTF-16 : 100 emoji refusés ; mesuré le 22/10 sur
+// les deux tarballs). Le manifeste porte donc `^4.5.0`, la racine du verrou le
+// suit (sans quoi `npm ci` refuse), et la version verrouillée le satisfait.
+// La mesure elle-même, sur le zod installé, vit dans test/mcp-tables.test.js
+// (70 emoji passent, 121 points de code non).
+test("zod : le plancher ^4.5.0 au manifeste et à la racine du verrou, et le zod verrouillé le satisfait", () => {
+  assert.equal(pkg.dependencies.zod, "^4.5.0", "le plancher de zod est 4.5");
+  const verrou = lireJson("package-lock.json");
+  assert.deepEqual(verrou.packages[""].dependencies, pkg.dependencies, "la racine du verrou suit les dépendances du manifeste (npm ci)");
+  const [majeur, mineur] = verrou.packages["node_modules/zod"].version.split(".").map(Number);
+  assert.ok(majeur === 4 && mineur >= 5, `le zod verrouillé (${verrou.packages["node_modules/zod"].version}) tient le plancher`);
+  assert.equal(lireJson("node_modules/zod/package.json").version, verrou.packages["node_modules/zod"].version, "node_modules dit la même version que le verrou");
 });

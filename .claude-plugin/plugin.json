@@ -1,6 +1,6 @@
 {
   "name": "valxos-messenger",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "VALXOS Messenger (formerly cc2cc-v2 / CEREAL): durable inter-instance messaging for coding sessions.",
   "author": {
     "name": "VALXOS contributors"

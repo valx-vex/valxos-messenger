@@ -52,8 +52,9 @@ import {
   reglagesDuFacteur,
   verifierLesReglages
 } from "../lib/config.js";
-import { journaliserAlias, recordEvent } from "../lib/database.js";
+import { enrichirPourAffichage, journaliserAlias, recordEvent } from "../lib/database.js";
 import {
+  ETAT_NON_REMIS,
   adresseDeRecu,
   buildEnvelope,
   buildWrapper,
@@ -61,6 +62,23 @@ import {
 } from "../lib/courier.js";
 import { isKnownHouse, tourHouses as tourHousesReelle } from "../lib/postbox.js";
 import { attenteDeLaLettre, resolveRecipient as resolveRecipientReel } from "../lib/registry.js";
+import { fichesCodex as fichesCodexReelles } from "../lib/chaise-codex.js";
+import { leBalayageEstDu, retournerLesLettres } from "./retour.js";
+import { enveloppeDeSonnette } from "../lib/sonnette.js";
+// Les RÈGLES de la porte Codex, jamais son lanceur : ce module est chargé par la
+// porte web (serveur.js → guichet.js → round.js), qui ne lance rien. La porte
+// elle-même (porte-codex.js) arrive par `deps.sonnerLaChaiseCodex`, tendue par
+// le démon et le one-shot du Facteur.
+import {
+  DELAI_SONNETTE_MS,
+  MOTIF_SONNETTE_DEJA_SONNEE,
+  MOTIF_SONNETTE_DIFFEREE,
+  MOTIF_SONNETTE_IMPOSSIBLE,
+  PORTE_CODEX_ABSENTE,
+  lienDuFil,
+  ouvertureReussie,
+  ouvertureTentee
+} from "./porte-codex-regles.js";
 
 // L'état DÉRIVÉ d'une lettre. Quatre valeurs, aucune stockée.
 export const ETAT_ACCUSEE = "ACCUSÉE";
@@ -84,6 +102,13 @@ function sommeil(ms) {
 }
 
 // ── L'ÉTAT SE DÉRIVE ────────────────────────────────────────────────────────
+// La lettre calme (1.1.0, `sans_reveil = 1`) n'est pas un cinquième état : c'est une décision du
+// guichet, lue sur la ligne, que la sélection de la tournée exclut (`prendreUneLettre`).
+export function lettreCalme(db, msgId) {
+  const ligne = db.prepare("SELECT sans_reveil FROM messages WHERE msg_id = ?").get(msgId);
+  return Number(ligne?.sans_reveil) === 1;
+}
+
 export function etatDuCourrier(db, msgId, { maintenant = Date.now() } = {}) {
   const lettre = db
     .prepare("SELECT msg_id, acked_at, facteur_not_before_ms FROM messages WHERE msg_id = ?")
@@ -207,6 +232,13 @@ export function prendreUneLettre(db, { porteur, maintenant, reglages, seulementL
   // file : un Facteur lancé à côté de vraies boîtes porterait sinon du courrier
   // réel que personne n'a demandé.
   const seulement = seulementLaLettre === null || seulementLaLettre === undefined ? null : String(seulementLaLettre);
+  // LA LETTRE CALME NE SE PORTE PAS (1.1.0, spec A §4, spec B §4). `sans_reveil = 1` est la décision
+  // du guichet pour une lettre de TABLE (`deciderLeReveil` : priorité LOW, table ou membre en
+  // `prochain-tour`, réaction en mode direct) ; une lettre ordinaire naît à 0 et se porte comme en
+  // 1.0.0. La lettre calme arrive par SessionStart, PostToolUse et `inbox`, jamais par une
+  // sonnette. Elle n'est donc ni prise, ni tentée, ni marquée `carried_at` — et elle ne passe pas
+  // derrière le curseur du balayage : elle n'est simplement jamais candidate. Rien n'est perdu
+  // (A9) : le canal de repli (`getPendingForContext`) la sert comme les autres.
   const choisir = db.prepare(`
     SELECT m.*
     FROM messages m
@@ -216,6 +248,7 @@ export function prendreUneLettre(db, { porteur, maintenant, reglages, seulementL
      AND a.lease_until_ms > @maintenant
     JOIN facteur_sweep s ON s.singleton = 1
     WHERE m.acked_at IS NULL
+      AND m.sans_reveil = 0
       AND m.facteur_not_before_ms <= @maintenant
       AND m.seq > s.cursor_seq
       AND m.seq <= s.sweep_max_seq
@@ -310,7 +343,10 @@ export function lierLaBoite(db, { attemptId, boite, maintenant, reglages }) {
 // Le repassage, lui, S'ÉLOIGNE : deuxième remise sans accusé, on attend deux
 // fois plus longtemps ; troisième, quatre fois — jusqu'au plafond, jamais
 // au-delà.
-export function noterLaRemise(db, { attemptId, msgId, cibleSession, porteur, maintenant, reglages }) {
+// `porteeA` (B17) : l'instant où la lettre est vraiment partie, quand il n'est
+// pas `maintenant` — une sonnerie Codex porte TOUTES les lettres de son
+// enveloppe à son instant à elle, pas à celui de chaque remise.
+export function noterLaRemise(db, { attemptId, msgId, cibleSession, porteur, maintenant, reglages, porteeA = null }) {
   const marque = db.transaction(() => {
     const changes = db
       .prepare(`
@@ -331,7 +367,7 @@ export function noterLaRemise(db, { attemptId, msgId, cibleSession, porteur, mai
       SET carried_at = COALESCE(carried_at, ?),
           facteur_not_before_ms = ?
       WHERE msg_id = ?
-    `).run(new Date(maintenant).toISOString(), maintenant + ajournement, msgId);
+    `).run(new Date(Number.isFinite(porteeA) ? porteeA : maintenant).toISOString(), maintenant + ajournement, msgId);
     recordEvent(db, msgId, porteur, "facteur_remis", {
       attempt_id: attemptId,
       target_session_id: cibleSession,
@@ -508,7 +544,7 @@ function sessionDeLExpediteur(db, sender, resoudre) {
 // ── L'ACHEMINEMENT ──────────────────────────────────────────────────────────
 // « Ta maison m'est inconnue » et « ta boîte dort » sont DEUX situations : les
 // confondre, c'est mentir à qui attend son courrier (amendement A4).
-export function trouverLaBoite(db, lettre, { parSession, houses, resoudre }) {
+export function trouverLaBoite(db, lettre, { parSession, houses, resoudre, fichesCodex = new Map() }) {
   const resolution = resoudre(db, lettre.recipient);
   // L'alias voyage avec CHAQUE verdict, livrable ou non : c'est ce qui permet
   // à la tournée de le journaliser, et à un avis de dire où la lettre attend.
@@ -516,14 +552,38 @@ export function trouverLaBoite(db, lettre, { parSession, houses, resoudre }) {
   if (resolution.kind === "unknown") {
     return avec({ motif: "destinataire-inconnu" });
   }
+  // À PORTER (relais) : le destinataire vit sur l'autre Mac. Ce n'est pas un
+  // inconnu : le Facteur n'a aucune boîte à sonner ici, il ajourne la lettre
+  // sous son vrai motif, et c'est le relais qui la porte.
+  if (resolution.kind === "distant") {
+    return avec({ motif: "a-porter", mac: resolution.mac });
+  }
   if (resolution.kind === "ambigu") {
     // La lettre ATTEND. Trancher soi-même, c'est un tirage au sort déguisé, et
     // le prix du tirage c'est une lettre lue par la mauvaise personne.
+    // LA CHAISE COURTE AMBIGUË (1.1.0, Tâche 8) n'est pas une lignée ambiguë :
+    // une désignation n'y change rien, c'est le préfixe qu'il faut allonger —
+    // le même motif que l'avis du guichet (`attenteDeLaLettre`).
+    if (resolution.abrege) return avec({ motif: "chaise-ambigue", candidats: resolution.targets.length });
     return avec({ motif: "lignee-ambigue", candidats: resolution.targets.length });
   }
   const cible = resolution.targets[0];
   const session = cible?.instance_session_id || null;
   if (!session) return avec({ motif: "chaise-sans-session" });
+
+  // LA PORTE CODEX (1.1.0, spec B §2) : une chaise Codex n'a pas de boîte native.
+  // Sa fiche (`<bureau>/codex/<lignée>.json`, écrite par notre hook SessionStart)
+  // dit son fil et son CODEX_HOME, et c'est `codex queue` qui sonne. La fiche se
+  // cherche par le FIL, qui EST la session inscrite au registre
+  // (`instance_session_id = thread_id`) — jamais par le nom, qu'une autre chaise
+  // de la même lignée pourrait porter — et elle ne vaut que pour la lignée
+  // qu'elle nomme. La porte lit le fil et le CODEX_HOME dans la FICHE, jamais
+  // sur la carte (que le serveur MCP nu de la chaise réécrit). Avant la boîte
+  // native : une chaise Codex n'écrit jamais de `sessions/<pid>.json`.
+  const fiche = fichesCodex?.get?.(String(session));
+  if (fiche && (!cible.lineage || fiche.lineage === cible.lineage)) {
+    return avec({ type: "codex", fiche, cible, session });
+  }
 
   const boite = parSession.get(session);
   if (boite) return avec({ boite, cible, session });
@@ -547,6 +607,50 @@ export function construireParSession(boxes) {
   return parSession;
 }
 
+// Les fiches Codex d'une tournée, par FIL : la carte `thread_id → fiche`, construite
+// une fois par tournée comme `parSession`. Une fiche moissonnée (`dead_at`) ou sans
+// CODEX_HOME n'est pas une porte : `lierLaBoite` exige une maison (CHECK de
+// `facteur_attempts`), et on ne sonne pas un processus qu'un docteur a constaté mort.
+export function construireFichesCodex(fiches) {
+  const parFil = new Map();
+  for (const fiche of Array.isArray(fiches) ? fiches : []) {
+    if (!fiche?.thread_id || !fiche?.codex_home || fiche.dead_at) continue;
+    const fil = String(fiche.thread_id);
+    if (!parFil.has(fil)) parFil.set(fil, fiche);
+  }
+  return parFil;
+}
+
+// La chaise Codex, dans la forme d'une boîte : c'est ce que `lierLaBoite` écrit
+// comme cible durable (maison = CODEX_HOME, session = fil, chemin = le lien du fil)
+// et ce que le plafond de politesse compte (par session). Pas de jeton, pas d'heure
+// de démarrage : aucune socket n'est frappée. Le pid est celui de la fiche, pour
+// le récit seulement — aucune décision ne le lit.
+export function boiteDeLaFicheCodex(fiche) {
+  return {
+    house: String(fiche.codex_home),
+    sessionId: String(fiche.thread_id),
+    procStart: null,
+    socketPath: lienDuFil(fiche.thread_id),
+    token: null,
+    name: fiche.lineage || null,
+    pid: fiche.pid ?? null,
+    kind: "codex"
+  };
+}
+
+// Lire les fiches Codex sans jamais casser une tournée, un scan ni un avis : un
+// dossier `codex/` illisible donne zéro fiche, et le journal le dit.
+function lireLesFichesCodexSansCasser(db, lire, journal = () => {}) {
+  try {
+    const fiches = lire(db);
+    return Array.isArray(fiches) ? fiches : [];
+  } catch (erreur) {
+    journal({ evenement: "facteur_fiches_codex_illisibles", detail: String(erreur?.message || erreur) });
+    return [];
+  }
+}
+
 // La tournée des maisons, prête à servir `trouverLaBoite` — MÊME defaults
 // que la tournée réelle (`tourHousesReelle`, `maisonsConnues`), pour qu'un
 // appelant hors du démon (le guichet MCP, le CLI) obtienne EXACTEMENT ce
@@ -554,7 +658,12 @@ export function construireParSession(boxes) {
 export function scannerLesMaisons(deps = {}) {
   const tournerLesMaisons = deps.tourHouses || tourHousesReelle;
   const { boxes, houses } = tournerLesMaisons(deps.maisons || maisonsConnues({ env: deps.env || process.env }));
-  return { houses, parSession: construireParSession(boxes) };
+  // Les fiches Codex font partie de l'inventaire (1.1.0) : la prochaine tournée
+  // sonnera ces chaises. Elles se lisent au bureau du processus (le dossier
+  // `codex/` à côté de la base) ; la base, quand elle est là, ne sert qu'au
+  // résumé de la carte. Illisibles : aucune, jamais une exception.
+  const fiches = lireLesFichesCodexSansCasser(deps.db || null, deps.fichesCodex || fichesCodexReelles);
+  return { houses, parSession: construireParSession(boxes), fichesCodex: construireFichesCodex(fiches) };
 }
 
 // ── L'AVIS COMPLET ──────────────────────────────────────────────────────────
@@ -585,13 +694,21 @@ const MESSAGES_MAISON = {
     `Session ${i.session} is in a known house (${i.maison}), but no mailbox answers there right now: the session process is gone or asleep.`
 };
 
-export function avisDAttente(db, lettre, { parSession, houses, resoudre, resolutionExistante = null } = {}) {
+// LA CHAISE CODEX (1.1.0) : livrable par la porte Codex, donc le silence. Un appelant
+// qui tient déjà les fiches de son scan (`scannerLesMaisons`) les tend
+// (`fichesCodex`, une Map qui fait foi) ; sans elles, l'avis les lit au bureau
+// lui-même — le guichet (`posterUneLettre`), `broadcast` et `envoi_status` ne
+// tendent que {houses, parSession}, et ils diraient sinon « maison inconnue »
+// d'une chaise que la prochaine tournée va sonner.
+export function avisDAttente(db, lettre, { parSession, houses, resoudre, resolutionExistante = null, fichesCodex = null } = {}) {
   const avisRegistre = attenteDeLaLettre(db, lettre.recipient, resolutionExistante);
   if (avisRegistre) return avisRegistre;
   try {
     const resoudreGele = resolutionExistante ? () => resolutionExistante : resoudre;
-    const acheminement = trouverLaBoite(db, lettre, { parSession, houses, resoudre: resoudreGele });
-    if (acheminement.boite) return null; // livrable : le silence des cas sains
+    const fiches =
+      fichesCodex instanceof Map ? fichesCodex : construireFichesCodex(lireLesFichesCodexSansCasser(db, fichesCodexReelles));
+    const acheminement = trouverLaBoite(db, lettre, { parSession, houses, resoudre: resoudreGele, fichesCodex: fiches });
+    if (acheminement.boite || acheminement.type === "codex") return null; // livrable : le silence des cas sains
     const auMessage = MESSAGES_MAISON[acheminement.motif];
     if (!auMessage) return null; // ambigu/inconnu/chaise-sans-session : déjà rendus plus haut
     return {
@@ -633,6 +750,220 @@ function direSansChaiseDesigneeUneFois(db, lettre, acheminement, porteur, journa
   }
 }
 
+// ── LA PORTE CODEX (1.1.0, spec B) ─────────────────────────────────────────
+// Une chaise Codex n'a pas de boîte native : on la SONNE (`codex queue`) avec
+// une enveloppe — jamais un corps — et le modèle relève lui-même sa boîte
+// (`inbox`). Quatre règles, toutes de la spec :
+//   · UNE sonnerie par chaise et par tournée : les lettres qui attendent
+//     ensemble partent dans la même enveloppe (« N letters waiting »), et les
+//     suivantes de la tournée reprennent le verdict de la première — un
+//     `codex` qui pend ne se refrappe pas N fois à cinq secondes pièce, et une
+//     lettre qui n'a frappé à aucune porte ne paie pas la pause. ⚠️ Un verdict
+//     RÉUSSI ne vaut que pour les lettres que l'enveloppe NOMMAIT (revue de la
+//     Tâche 10, constat 4) : une lettre arrivée pendant la sonnerie, ou venue
+//     sous une autre adresse de la même chaise, marquée portée sur ce verdict,
+//     ne sonnerait jamais. Elle attend la tournée suivante
+//     (`sonnette-codex-differee`, échéance d'un échec passager). Un verdict
+//     d'ÉCHEC, lui, vaut pour toute lettre du fil ;
+//   · UNE sonnerie par lettre au plus : une lettre déjà `carried_at` ne resonne
+//     JAMAIS (motif `sonnette-codex-deja-sonnee`, échéance FINIE : A9 tient, ce
+//     sont les hooks qui la re-servent au prochain tour — « pas de rafale
+//     tardive ») ;
+//   · UNE ouverture de l'app au plus par lettre : une sonnerie qui l'a tentée
+//     le note sur chacune de ses lettres qui n'en avaient pas encore
+//     (`facteur_codex_app_ouverte`, la base garde, jamais un drapeau en
+//     mémoire ; S11 : une tentative par lettre, et le journal du Facteur dit
+//     l'ouverture une fois par enveloppe). Le droit se juge PAR LETTRE NEUVE
+//     (A4, passe adverse) : une enveloppe la retente tant qu'une de ses lettres
+//     n'en a jamais eu — une ancienne lettre déjà tentée ne supprime pas le
+//     droit d'une neuve qui voyage avec elle ; une enveloppe dont chaque lettre
+//     a eu la sienne ne la retente pas. Une lettre portée ne resonne pas :
+//     `carried_at` ferme déjà le cas nominal ; la note ferme celui où la file a
+//     refusé ;
+//   · un échec est un motif, `sonnette-codex-impossible`, reporté comme un
+//     échec passager : la lettre attend, le canal de repli la sert.
+// Le verdict a la forme de celui du guichet natif (`ok`, `etat` | `reason`,
+// `permanent`, `detail`) pour que la queue de la tournée — remise, échec,
+// journal — soit la MÊME pour les deux portes. `ajournementMs`, quand il est là,
+// dit l'échéance à poser au lieu de la déduire de `permanent` ; `frappe: false`
+// dit qu'aucune porte n'a été frappée pour cette lettre.
+const EVENEMENT_APP_OUVERTE = "facteur_codex_app_ouverte";
+
+// Les adresses qui mènent à CETTE chaise : celles des lettres qui pourraient
+// sonner, que la résolution de la tournée (`resoudre`, la même que
+// `trouverLaBoite`) ramène à une cible unique, dont la session est ce fil. Une
+// lettre à la chaise sous son adresse entière, ou sous un ancien nom, voyage
+// donc dans la même enveloppe que celle adressée à la lignée — et une lignée
+// ambiguë n'y entre jamais. La lettre en main y est toujours.
+function adressesDeLaChaise(db, { lettre, fil, resoudre }) {
+  const adresses = new Set([String(lettre.recipient)]);
+  const candidates = db
+    .prepare("SELECT DISTINCT recipient FROM messages WHERE acked_at IS NULL AND sans_reveil = 0 AND carried_at IS NULL")
+    .all()
+    .map((ligne) => String(ligne.recipient));
+  for (const adresse of candidates) {
+    if (adresses.has(adresse)) continue;
+    try {
+      const resolution = resoudre(db, adresse);
+      const [cible] = resolution.targets || [];
+      if (resolution.kind !== "ambigu" && resolution.targets.length === 1 && String(cible?.instance_session_id) === fil) {
+        adresses.add(adresse);
+      }
+    } catch {
+      /* une adresse que le registre ne sait pas lire n'entre pas dans l'enveloppe */
+    }
+  }
+  return [...adresses];
+}
+
+// Les lettres que CETTE sonnerie couvre : celles de la chaise qui réveillent
+// (`sans_reveil = 0`), jamais portées, et que la tournée peut prendre
+// maintenant (échéance passée, aucune tentative en main) — plus la lettre en
+// main. La plus urgente d'abord, puis la plus ancienne : l'enveloppe décrit sa
+// PREMIÈRE ligne (sonnette.js), le même ordre que `parUrgence`.
+function lettresASonner(db, { lettre, adresses, maintenant }) {
+  const trous = adresses.map(() => "?").join(", ");
+  return db
+    .prepare(`
+      SELECT m.* FROM messages m
+      WHERE m.recipient IN (${trous})
+        AND m.acked_at IS NULL
+        AND m.sans_reveil = 0
+        AND m.carried_at IS NULL
+        AND (
+          m.msg_id = ?
+          OR (
+            m.facteur_not_before_ms <= ?
+            AND NOT EXISTS (
+              SELECT 1 FROM facteur_attempts a
+              WHERE a.msg_id = m.msg_id AND a.state IN ${TENTATIVES_ACTIVES} AND a.lease_until_ms > ?
+            )
+          )
+        )
+      ORDER BY CASE m.priority
+                 WHEN 'critical' THEN 3
+                 WHEN 'high' THEN 2
+                 WHEN 'normal' THEN 1
+                 WHEN 'low' THEN 0
+                 ELSE 1
+               END DESC, m.seq ASC
+    `)
+    .all(...adresses, String(lettre.msg_id), maintenant, maintenant);
+}
+
+// Ce qui attend déjà la chaise en plus de cette sonnerie, sous toutes ses adresses.
+function lettresDuesALaChaise(db, adresses) {
+  const trous = adresses.map(() => "?").join(", ");
+  const ligne = db
+    .prepare(`SELECT count(*) AS n FROM messages WHERE recipient IN (${trous}) AND acked_at IS NULL`)
+    .get(...adresses);
+  return Number(ligne?.n || 0);
+}
+
+// Les lettres de l'enveloppe qui ont encore droit à leur ouverture (A4) : celles
+// qui n'en ont jamais eu. Une seule suffit pour ouvrir ; c'est sur elles, et sur
+// elles seules, que la tentative se note (S11 : une tentative par lettre — une
+// ancienne lettre couverte par l'ouverture d'une neuve n'en reçoit pas une seconde).
+function lettresADroitALOuverture(db, rows) {
+  const lire = db.prepare("SELECT 1 FROM delivery_events WHERE msg_id = ? AND event_type = ? LIMIT 1");
+  return rows.filter((row) => !lire.get(row.msg_id, EVENEMENT_APP_OUVERTE));
+}
+
+async function sonnerLaPorteCodex(db, { fiche, lettre, sonneries, sonner, reglages, journal, porteur, maintenant, seulementLaLettre, resoudre, horloge = () => Date.now() }) {
+  if (lettre.carried_at) {
+    return {
+      ok: false,
+      etat: ETAT_NON_REMIS,
+      reason: MOTIF_SONNETTE_DEJA_SONNEE,
+      permanent: false,
+      detail: null,
+      ajournementMs: reglages.ajournementApresRemiseMs,
+      frappe: false
+    };
+  }
+  const fil = String(fiche.thread_id);
+  const memo = sonneries.get(fil);
+  if (memo) {
+    if (!memo.verdict.ok || memo.couvertes.has(String(lettre.msg_id))) return { ...memo.verdict, frappe: false };
+    return {
+      ok: false,
+      etat: ETAT_NON_REMIS,
+      reason: MOTIF_SONNETTE_DIFFEREE,
+      permanent: false,
+      detail: null,
+      ajournementMs: reglages.ajournementTransitoireMs,
+      frappe: false
+    };
+  }
+
+  // Le mode une-lettre ne sonne que pour la lettre demandée : les autres
+  // resteraient sonnées sans être portées.
+  const adresses = seulementLaLettre ? [String(lettre.recipient)] : adressesDeLaChaise(db, { lettre, fil, resoudre });
+  const enAttente = seulementLaLettre ? [] : lettresASonner(db, { lettre, adresses, maintenant });
+  const rows = enAttente.length > 0 ? enAttente : [lettre];
+  const autres = Math.max(0, lettresDuesALaChaise(db, adresses) - rows.length);
+  const enveloppe = enveloppeDeSonnette(enrichirPourAffichage(db, rows), {
+    destinataire: fiche.lineage || lettre.recipient,
+    autresNonLues: autres
+  });
+  const aDroit = lettresADroitALOuverture(db, rows);
+  const ouvrirApp = reglages.ouvrirLAppCodex !== false && aDroit.length > 0;
+  // Le couperet de chaque enfant suit le délai d'un dépôt : la porte entière
+  // (deux délais) tient alors dans le bail que `verifierLesReglages` garantit
+  // plus long qu'un dépôt et sa marge.
+  const delaiMs = Math.min(DELAI_SONNETTE_MS, Number(reglages.delaiDeRemiseMs) || DELAI_SONNETTE_MS);
+  let resultat;
+  try {
+    resultat = await sonner({ fiche, enveloppe, ouvrirApp, delaiMs });
+  } catch (erreur) {
+    // La porte promet de ne jamais lever ; si elle le fait quand même, c'est un
+    // échec de sonnette, pas une tournée interrompue.
+    resultat = { ok: false, mode: null, erreur: String(erreur?.code || erreur?.message || erreur) };
+  }
+  if (ouvertureTentee(resultat)) {
+    const ok = ouvertureReussie(resultat);
+    // La tentative se note sur les lettres qui y avaient droit, une fois chacune ;
+    // le journal dit l'ouverture de l'app UNE fois pour l'enveloppe, pour qui, et
+    // combien de lettres elle couvre (S11).
+    for (const row of aDroit) recordEvent(db, row.msg_id, porteur, EVENEMENT_APP_OUVERTE, { thread_id: fil, ok });
+    journal({
+      evenement: EVENEMENT_APP_OUVERTE,
+      lignee: fiche.lineage || null,
+      thread_id: fil,
+      ok,
+      pour: aDroit.map((row) => String(row.msg_id)),
+      lettres: rows.length
+    });
+  }
+  // B17 (marche Codex) : l'instant de la sonnerie, lu quand la porte a rendu
+  // la main — celui que chaque lettre de l'enveloppe portera (`carried_at`),
+  // même remise après la pause entre remises.
+  const verdict = resultat?.ok
+    ? { ok: true, etat: resultat.mode === "queue+open" ? "sonnee-codex-app-ouverte" : "sonnee-codex", sonneeA: horloge() }
+    : { ok: false, etat: ETAT_NON_REMIS, reason: MOTIF_SONNETTE_IMPOSSIBLE, permanent: false, detail: resultat?.erreur || null };
+  sonneries.set(fil, { verdict, couvertes: new Set(rows.map((row) => String(row.msg_id))) });
+  // Jamais l'enveloppe au journal : elle cite un sujet.
+  journal({
+    evenement: "facteur_sonnette_codex",
+    lignee: fiche.lineage || null,
+    thread_id: fil,
+    porte: fiche.porte || null,
+    lettres: rows.length,
+    autres_non_lues: autres,
+    ouvrir_app: ouvrirApp,
+    ok: Boolean(resultat?.ok),
+    mode: resultat?.mode || null,
+    erreur: resultat?.erreur || null
+  });
+  return verdict;
+}
+
+// La tournée à qui personne n'a tendu la porte Codex : un verdict, jamais un
+// lancement. Le démon et le one-shot la tendent toujours (daemon.js, bin/facteur.js).
+async function porteCodexAbsente() {
+  return { ok: false, mode: null, erreur: PORTE_CODEX_ABSENTE };
+}
+
 export async function faireLaTournee(db, deps = {}) {
   const reglages = verifierLesReglages({
     ...reglagesDuFacteur(deps.env || process.env),
@@ -645,6 +976,8 @@ export async function faireLaTournee(db, deps = {}) {
   const remettre = deps.remettreAuGuichet || remettreAuGuichetReel;
   const resoudre = deps.resolveRecipient || resolveRecipientReel;
   const dormir = deps.dormir || sommeil;
+  const sonner = deps.sonnerLaChaiseCodex || porteCodexAbsente;
+  const lireLesFichesCodex = deps.fichesCodex || fichesCodexReelles;
   // ── LE MODE UNE-LETTRE ────────────────────────────────────────────────────
   // La tournée ne prend QUE celle-ci, quoi qu'il y ait d'autre au bureau. C'est
   // la porte de la cérémonie : un Facteur non filtré, lancé à côté de vraies
@@ -664,6 +997,11 @@ export async function faireLaTournee(db, deps = {}) {
   // qu'une seule fois.
   const boitesMuettes = new Map();
   const parSession = construireParSession(boxes);
+  // Les fiches Codex se relisent aussi à chaque tournée (une chaise Codex née
+  // après le démarrage du démon doit être vue), et les sonneries de CETTE
+  // tournée se souviennent : une par fil, quel que soit le nombre de lettres.
+  const fichesCodex = construireFichesCodex(lireLesFichesCodexSansCasser(db, lireLesFichesCodex, journal));
+  const sonneriesCodex = new Map();
 
   for (let prises = 0; prises < reglages.lettresParTournee; prises += 1) {
     let prise;
@@ -688,7 +1026,11 @@ export async function faireLaTournee(db, deps = {}) {
       if (seulementLaLettre && bilan.prises === 0) {
         const etat = etatDuCourrier(db, seulementLaLettre, { maintenant: horloge() });
         noter(etat ? "lettre-non-prise" : "lettre-introuvable");
-        journal({ evenement: "facteur_lettre_non_prise", msg_id: seulementLaLettre, etat: etat || null });
+        // UNE LETTRE CALME SE DIT (1.1.0, revue T4) : `prendreUneLettre` ne la prend jamais, alors
+        // que son état de Facteur peut être PRÊTE (ni réservée, ni différée). Le journal porte
+        // `calme: true` pour qu'un « pourquoi pas portée » ne lise jamais un PRÊTE nu ; absent sinon.
+        const calme = etat ? lettreCalme(db, seulementLaLettre) : false;
+        journal({ evenement: "facteur_lettre_non_prise", msg_id: seulementLaLettre, etat: etat || null, ...(calme ? { calme: true } : {}) });
       }
       break;
     }
@@ -697,7 +1039,7 @@ export async function faireLaTournee(db, deps = {}) {
     const { attemptId, lettre } = prise;
 
     try {
-      const acheminement = trouverLaBoite(db, lettre, { parSession, houses, resoudre });
+      const acheminement = trouverLaBoite(db, lettre, { parSession, houses, resoudre, fichesCodex });
       // Une lettre déposée avant l'alias : le Facteur est le premier à le voir.
       if (acheminement.alias) {
         journaliserAlias(db, lettre, {
@@ -706,7 +1048,8 @@ export async function faireLaTournee(db, deps = {}) {
           targets: acheminement.cible ? [acheminement.cible] : []
         }, porteur);
       }
-      if (!acheminement.boite) {
+      const ficheCodex = acheminement.type === "codex" ? acheminement.fiche : null;
+      if (!acheminement.boite && !ficheCodex) {
         // Le constat AVANT l'échec : la dernière ligne de la lettre reste celle de
         // son ajournement (ce que lit quiconque demande « pourquoi attend-elle »).
         if (acheminement.motif === "lignee-ambigue") direSansChaiseDesigneeUneFois(db, lettre, acheminement, porteur, journal);
@@ -733,7 +1076,9 @@ export async function faireLaTournee(db, deps = {}) {
         continue;
       }
 
-      const boite = acheminement.boite;
+      // La chaise Codex se LIE comme une boîte (maison = CODEX_HOME, session =
+      // fil) : même bail, même plafond de politesse, même clôture.
+      const boite = ficheCodex ? boiteDeLaFicheCodex(ficheCodex) : acheminement.boite;
 
       // ── LE PLAFOND DE POLITESSE ─────────────────────────────────────────
       // Cette boîte a déjà reçu tout ce qu'une fenêtre lui accorde : on se TAIT
@@ -790,36 +1135,53 @@ export async function faireLaTournee(db, deps = {}) {
         continue;
       }
 
-      const adresseDuFacteur =
-        deps.adresseDuFacteur || adresseDeRecu(boite.socketPath, NOM_DE_LA_BOITE_DU_FACTEUR);
-      const contenu = buildWrapper({
-        from: adresseDuFacteur,
-        fromSession: sessionDeLExpediteur(db, lettre.sender, resoudre),
-        hopChain: "facteur",
-        fromName: lettre.sender,
-        fromMode: "default",
-        text: plierLaLettre(lettre, { attemptId })
-      });
-      const enveloppe = buildEnvelope({
-        msgId: lettre.msg_id,
-        content: contenu,
-        priority: "next", // « now » ne veut pas dire « vu tout de suite » (A5)
-        from: adresseDuFacteur,
-        // ⚠️ VERROU D'INCARNATION (A3) : la session VISÉE, celle qu'on vient de
-        // lier — jamais recalculée après coup.
-        sessionId: boite.sessionId
-      });
+      let verdict;
+      if (ficheCodex) {
+        verdict = await sonnerLaPorteCodex(db, {
+          fiche: ficheCodex,
+          lettre,
+          sonneries: sonneriesCodex,
+          sonner,
+          reglages,
+          journal,
+          porteur,
+          maintenant: horloge(),
+          seulementLaLettre,
+          resoudre,
+          horloge
+        });
+      } else {
+        const adresseDuFacteur =
+          deps.adresseDuFacteur || adresseDeRecu(boite.socketPath, NOM_DE_LA_BOITE_DU_FACTEUR);
+        const contenu = buildWrapper({
+          from: adresseDuFacteur,
+          fromSession: sessionDeLExpediteur(db, lettre.sender, resoudre),
+          hopChain: "facteur",
+          fromName: lettre.sender,
+          fromMode: "default",
+          text: plierLaLettre(lettre, { attemptId })
+        });
+        const enveloppe = buildEnvelope({
+          msgId: lettre.msg_id,
+          content: contenu,
+          priority: "next", // « now » ne veut pas dire « vu tout de suite » (A5)
+          from: adresseDuFacteur,
+          // ⚠️ VERROU D'INCARNATION (A3) : la session VISÉE, celle qu'on vient de
+          // lier — jamais recalculée après coup.
+          sessionId: boite.sessionId
+        });
 
-      const verdict = await remettre(
-        {
-          socketPath: boite.socketPath,
-          token: boite.token,
-          envelope: enveloppe,
-          lingerMs: reglages.delaiDeFermetureMs,
-          timeoutMs: reglages.delaiDeRemiseMs
-        },
-        deps.reseau || {}
-      );
+        verdict = await remettre(
+          {
+            socketPath: boite.socketPath,
+            token: boite.token,
+            envelope: enveloppe,
+            lingerMs: reglages.delaiDeFermetureMs,
+            timeoutMs: reglages.delaiDeRemiseMs
+          },
+          deps.reseau || {}
+        );
+      }
 
       // ⚠️ On se branche sur `ok`, JAMAIS sur `etat` : DEUX états valent succès
       // (`remis-au-guichet` et `remis-au-guichet-fermeture-subie`). Le second est
@@ -831,7 +1193,8 @@ export async function faireLaTournee(db, deps = {}) {
           cibleSession: boite.sessionId,
           porteur,
           maintenant: horloge(),
-          reglages
+          reglages,
+          porteeA: verdict.sonneeA ?? null
         });
         if (marquee) {
           bilan.remises += 1;
@@ -855,9 +1218,11 @@ export async function faireLaTournee(db, deps = {}) {
         // Un échec DÉFINITIF ne se rejoue pas au rythme des passagers : il
         // s'ajourne longtemps et s'écrit. Le canal de repli, lui, sert la lettre
         // pendant ce temps-là.
-        const ajournementMs = verdict.permanent
-          ? reglages.ajournementEchecDefinitifMs
-          : reglages.ajournementTransitoireMs;
+        // La porte Codex sait parfois l'échéance qu'elle veut (une lettre déjà
+        // sonnée revient au rythme d'une remise, pas d'un échec passager).
+        const ajournementMs =
+          verdict.ajournementMs ??
+          (verdict.permanent ? reglages.ajournementEchecDefinitifMs : reglages.ajournementTransitoireMs);
         const reprise = noterLEchec(db, {
           attemptId,
           msgId: lettre.msg_id,
@@ -887,7 +1252,11 @@ export async function faireLaTournee(db, deps = {}) {
       // portier saturé rend précisément les verdicts d'ÉCHEC. Une pause réservée
       // à la branche du succès laisse donc le chemin de l'échec partir en rafale
       // contre la boîte qui refuse déjà : le défaut se nourrit lui-même.
-      if (Number(reglages.pauseEntreRemisesMs) > 0) await dormir(Number(reglages.pauseEntreRemisesMs));
+      // Une lettre Codex qui reprend le verdict de sa chaise, ou déjà sonnée, n'a
+      // frappé à AUCUNE porte : elle ne paie pas la pause (`frappe: false`).
+      if (verdict.frappe !== false && Number(reglages.pauseEntreRemisesMs) > 0) {
+        await dormir(Number(reglages.pauseEntreRemisesMs));
+      }
     } catch (erreur) {
       // Le bureau s'est fermé en cours de tournée : on s'arrête là. Le bail de
       // la tentative en cours expirera et la lettre reviendra (A9).
@@ -899,6 +1268,39 @@ export async function faireLaTournee(db, deps = {}) {
       });
       noter("bureau-ferme");
       break;
+    }
+  }
+
+  // ── LE RETOUR À L'EXPÉDITEUR (1.1.0, Tâche 3) ───────────────────────────
+  // Une lettre vers un nom que personne n'a JAMAIS porté revient à son expéditeur après
+  // `retourApresMs` (retour.js). Le balayage lit le bureau, pas la sélection ci-dessus : une
+  // lettre ajournée ou calme revient aussi, et une lettre écrite sans le serveur MCP aussi.
+  // Jamais en mode une-lettre (la cérémonie ne porte que la lettre demandée), jamais sur un
+  // bureau fermé, jamais quand les retours sont éteints (`VALXOS_RETOUR_APRES_S=0`) ; un
+  // balayage qui casse se dit et ne casse pas la tournée. Le démon tend sa mémoire
+  // (`memoireDuRetour`) : il balaie au plus une fois par minute, pas à chaque tournée.
+  const maintenantDuRetour = horloge();
+  if (
+    !seulementLaLettre &&
+    !bilan.motifs["bureau-ferme"] &&
+    Number(reglages.retourApresMs) > 0 &&
+    leBalayageEstDu(deps.memoireDuRetour, maintenantDuRetour)
+  ) {
+    try {
+      const retournees = retournerLesLettres(db, {
+        maintenant: maintenantDuRetour,
+        retourApresMs: reglages.retourApresMs,
+        porteur,
+        journal,
+        resoudre
+      });
+      if (retournees > 0) bilan.motifs["retour-a-l-expediteur"] = retournees;
+    } catch (erreur) {
+      journal({
+        evenement: "facteur_retour_impossible",
+        code: erreur?.code || null,
+        detail: String(erreur?.message || erreur)
+      });
     }
   }
 

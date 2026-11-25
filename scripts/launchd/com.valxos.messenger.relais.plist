@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- written by valxos-messenger install -->
+<!-- The relay of VALXOS Messenger: it carries letters between two Macs over
+     ssh. OPTIONAL: only `node scripts/install.js --relais --write` writes this
+     file, and only on the Mac that runs the relay. Re-run it to refresh this
+     file after moving the repository or updating Node (it names a node
+     path). `valxos-messenger install --uninstall` removes it along with the
+     whole Messenger of this Mac; to remove only the relay, see
+     docs/RELAIS.md, "Remove the relay". ExitTimeOut: on SIGTERM the relay
+     finishes its round, then hands back what it owes in one last exchange
+     (up to 15 s each); launchd's default of 20 s could cut it. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.valxos.messenger.relais</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__REPO_ROOT__/src/bin/relais.js</string>
+    <string>tournee</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>VALXOS_MESSENGER_HOME</key>
+    <string>__RUNTIME_HOME__</string>
+    <key>PATH</key>
+    <string>__NODE_DIR__:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ExitTimeOut</key>
+  <integer>45</integer>
+  <key>StandardOutPath</key>
+  <string>__RUNTIME_HOME__/logs/relais.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__RUNTIME_HOME__/logs/relais.err.log</string>
+</dict>
+</plist>

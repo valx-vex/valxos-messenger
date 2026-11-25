@@ -34,7 +34,11 @@ export function environnement(home, ajouts = {}) {
     VALXOS_MESSENGER_HOME: path.join(home, ".valxos-messenger"),
     PATH: path.join(home, "bin")
   };
-  for (const clef of ["CLAUDE_CONFIG_DIR", "CC2CC_V2_HOME", "CC2CC_GARDE_BUREAU", "VALXOS_GARDE_BUREAU"]) {
+  // CODEX_HOME (1.1.0) : la maison Codex du lanceur ne descend jamais dans un
+  // installeur de test — un `install --codex` sans --codex-home viserait la sienne.
+  // VALXOS_MAISONS (1.1.0) : l'installeur épingle dans les plists la déclaration
+  // avec laquelle il tourne — celle du lanceur n'y descend jamais par accident.
+  for (const clef of ["CLAUDE_CONFIG_DIR", "CC2CC_V2_HOME", "CC2CC_GARDE_BUREAU", "VALXOS_GARDE_BUREAU", "CODEX_HOME", "VALXOS_MAISONS", "CC2CC_MAISONS"]) {
     delete env[clef];
   }
   return { ...env, ...ajouts };

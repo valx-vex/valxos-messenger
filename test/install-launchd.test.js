@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { MARKER, renderPlist, verdict } from "../scripts/launchd/plists.js";
+import { MARKER, planPlists, renderPlist, verdict } from "../scripts/launchd/plists.js";
 import { arbre, fauxHome, lancer, rapport, repo } from "./aide-installeur.js";
 import { quarantaine } from "./aide-quarantaine.js";
 
@@ -87,6 +87,64 @@ test("--launchd écrit deux plists marqués, aux chemins réels, sous ~/Library/
     LABELS.map((label) => [label, cheminDuPlist(home, label), "written"])
   );
   assert.match(sortie.stdout, /launchctl bootstrap gui\/\$\(id -u\)/, "le résumé dit comment charger à la main");
+});
+
+// ── LES MAISONS DU FACTEUR (1.1.0, Tâche 2) ─────────────────────────────────
+// launchd lance le Facteur et la porte web avec un environnement nu : la liste
+// des maisons s'épingle dans les deux plists, comme le bureau. Le GABARIT
+// publié reste générique — un placeholder, aucun chemin, aucun nom de maison ;
+// le rendu vaut `<home>/.claude` par défaut, ou la déclaration VALXOS_MAISONS
+// (alias CC2CC_MAISONS) avec laquelle l'installeur tourne, telle quelle : une
+// rue `…/*` reste une rue, le Facteur la relit à chaque tournée.
+function maisonsDuPlist(texte) {
+  const m = texte.match(/<key>VALXOS_MAISONS<\/key>\s*<string>([^<]*)<\/string>/);
+  return m ? m[1] : null;
+}
+
+test("les gabarits du Facteur et de la porte web portent VALXOS_MAISONS en placeholder, et rien d'autre", () => {
+  for (const label of LABELS) {
+    const gabarit = fs.readFileSync(path.join(repo, "scripts", "launchd", `${label}.plist`), "utf8");
+    assert.equal(maisonsDuPlist(gabarit), "__VALXOS_MAISONS__", `${label} : la valeur publiée est le placeholder seul`);
+    assert.equal(gabarit.match(/VALXOS_MAISONS/g).length, 2, `${label} : la clef et son placeholder, une fois chacun`);
+    for (const absent of ["CC2CC_MAISONS", "CLAUDE_CONFIG_DIR", "/*"]) {
+      assert.ok(!gabarit.includes(absent), `${label} : le gabarit publié ne porte pas ${absent}`);
+    }
+  }
+});
+
+test("--launchd sans déclaration : les deux plists épinglent <home>/.claude", (t) => {
+  const home = fauxHome(t);
+  const sortie = lancer(home, ["--launchd", "--no-enable"]);
+  assert.equal(sortie.status, 0, `${sortie.stdout}\n${sortie.stderr}`);
+  for (const label of LABELS) {
+    assert.equal(maisonsDuPlist(fs.readFileSync(cheminDuPlist(home, label), "utf8")), path.join(home, ".claude"), label);
+  }
+});
+
+test("--launchd sous VALXOS_MAISONS (ou son alias) : les deux plists épinglent la déclaration telle quelle, rue comprise", (t) => {
+  for (const clef of ["VALXOS_MAISONS", "CC2CC_MAISONS"]) {
+    const home = fauxHome(t);
+    const declaration = `${path.join(home, ".claude")}:/opt/valxos/maisons/*`;
+    const sortie = lancer(home, ["--launchd", "--no-enable"], { [clef]: declaration });
+    assert.equal(sortie.status, 0, `${sortie.stdout}\n${sortie.stderr}`);
+    for (const label of LABELS) {
+      assert.equal(maisonsDuPlist(fs.readFileSync(cheminDuPlist(home, label), "utf8")), declaration, `${clef} → ${label}`);
+    }
+  }
+});
+
+test("planPlists : `maisons` absent vaut <home>/.claude ; donné, il passe tel quel et échappé", () => {
+  const base = { home: "/opt/valxos/home", root: "/opt/valxos/repo", runtimeHome: "/opt/valxos/bureau", node: "/opt/valxos/bin/node" };
+  for (const [maisons, attendu] of [
+    [undefined, "/opt/valxos/home/.claude"],
+    [null, "/opt/valxos/home/.claude"],
+    ["/opt/valxos/a:/opt/valxos/rue/*", "/opt/valxos/a:/opt/valxos/rue/*"],
+    ["/opt/valxos/a&b", "/opt/valxos/a&amp;b"]
+  ]) {
+    for (const plan of planPlists({ ...base, maisons })) {
+      assert.equal(maisonsDuPlist(plan.content), attendu, `${plan.label} : ${maisons}`);
+    }
+  }
 });
 
 test("--operator épingle l'opérateur dans le plist web, et le résumé dit qu'il prime sur web.env", (t) => {
@@ -363,6 +421,7 @@ test("les plists écrits sont lisibles par le système (plutil), avec la structu
   assert.equal(dict.EnvironmentVariables.VALXOS_WEB_OPERATEUR, undefined, "pas d'opérateur épinglé sans --operator");
   assert.equal(dict.EnvironmentVariables.VALXOS_MESSENGER_HOME, path.join(home, ".valxos-messenger"));
   assert.equal(dict.EnvironmentVariables.HOME, home);
+  assert.equal(dict.EnvironmentVariables.VALXOS_MAISONS, path.join(home, ".claude"), "les maisons du Facteur, épinglées");
   assert.equal(dict.RunAtLoad, true);
   assert.equal(dict.KeepAlive, true);
 });

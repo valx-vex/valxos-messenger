@@ -505,7 +505,7 @@ test("AU GUICHET — la session éteint sa lettre nominative par le nom qu'elle 
   // PATH est requis pour retrouver `node` ; CC2CC_SELF vaut la LIGNÉE, et la
   // fiche de session fait dériver la CHAISE sess-1 (Task 7, fix round 2).
   const recolte = await auGuichet(
-    { PATH: process.env.PATH, CC2CC_V2_HOME: root, CC2CC_SELF: "alice", CLAUDE_CONFIG_DIR: ficheDeSession(root, "sess-1") },
+    { PATH: process.env.PATH, HOME: root, CC2CC_V2_HOME: root, CC2CC_SELF: "alice", CLAUDE_CONFIG_DIR: ficheDeSession(root, "sess-1") },
     (client) => appel(client, "ack", { msg_id: "G1" })
   );
 
@@ -532,7 +532,7 @@ test("AU GUICHET — un refus dit D'OÙ VIENT le nom qu'on lui a opposé", async
   // `mcp.json` aujourd'hui. Le nom dérivé devient le nom d'hôte, et l'accusé est
   // refusé : le refus doit rendre ce défaut d'installation LISIBLE.
   const recolte = await auGuichet(
-    { PATH: process.env.PATH, CC2CC_V2_HOME: root },
+    { PATH: process.env.PATH, HOME: root, CC2CC_V2_HOME: root },
     (client) => appel(client, "ack", { msg_id: "G2" })
   );
 
@@ -559,7 +559,7 @@ test("AU GUICHET — le reçu d'identité déclarée ne s'écrit pas sur une let
   db.close();
 
   await auGuichet(
-    { PATH: process.env.PATH, CC2CC_V2_HOME: root, CC2CC_SELF: "alice" },
+    { PATH: process.env.PATH, HOME: root, CC2CC_V2_HOME: root, CC2CC_SELF: "alice" },
     (client) => client.callTool({ name: "ack", arguments: { msg_id: "PAS-DE-LETTRE", self: "intrus" } })
   );
 
@@ -742,7 +742,7 @@ test("AU GUICHET — ce soir, la session éteint la lettre de juillet par le nom
   // Aucun `self` déclaré : le guichet dérive SEUL son nom — sa chaise, par sa
   // fiche (fix round 2).
   const recolte = await auGuichet(
-    { PATH: process.env.PATH, CC2CC_V2_HOME: root, CC2CC_SELF: "claude-alice", CLAUDE_CONFIG_DIR: ficheDeSession(root, "sess-ce-soir") },
+    { PATH: process.env.PATH, HOME: root, CC2CC_V2_HOME: root, CC2CC_SELF: "claude-alice", CLAUDE_CONFIG_DIR: ficheDeSession(root, "sess-ce-soir") },
     (client) => appel(client, "ack", { msg_id: "bob-22-07" })
   );
 
@@ -816,7 +816,7 @@ test("RÉPÉTITION GÉNÉRALE — le vrai hook livre, le vrai guichet éteint, e
   // 3. Le vrai guichet, SANS `self` : il dérive son nom tout seul — sa chaise,
   //    par sa fiche de session (fix round 2).
   const recolte = await auGuichet(
-    { PATH: process.env.PATH, CC2CC_V2_HOME: root, CC2CC_SELF: "claude-alice", CLAUDE_CONFIG_DIR: ficheDeSession(root, "sess-ce-soir") },
+    { PATH: process.env.PATH, HOME: root, CC2CC_V2_HOME: root, CC2CC_SELF: "claude-alice", CLAUDE_CONFIG_DIR: ficheDeSession(root, "sess-ce-soir") },
     (client) => appel(client, "ack", { msg_id: "bob-22-07" })
   );
   assert.equal(recolte.acked, true, `le guichet a refusé l'accusé : ${recolte.raison ?? ""} (origine ${recolte.origine ?? "?"})`);

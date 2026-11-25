@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { FORMES_PRIVEES, identitesDeCetteMachine } from "./aide-identites.js";
 import { clefValxos, pluginTargetPath } from "../src/lib/config.js";
 
@@ -479,14 +480,141 @@ test("Claude Code : le lien `skills-dir` et `claude plugin enable` ne sont pas d
   );
 });
 
-test("Codex : la version 0.163.0, arrivée par mise à jour automatique pendant la vérification, n'est pas dite testée", () => {
+test("Codex : le reçu MCP du 2026-10-18 reste borné à 0.162.1 ; la sonnette est vérifiée sur 0.163.0 (2026-10-21, puis 2026-10-22 en direct)", () => {
   const codex = plat(sectionDe(lireLaDoc(), /^## [^\n]*Codex/m));
   assert.ok(
-    codex.includes("Not tested: codex-cli 0.163.0 (it updated itself during the run; the verification ran on 0.162.1);"),
-    "Codex : 0.163.0 est dans « Not tested »"
+    codex.includes("Not tested: the MCP round trip of this section on codex-cli 0.163.0 (the 2026-10-18 verification ran on 0.162.1, which updated itself during that run;"),
+    "Codex : la portée du reçu MCP du 18/10 reste bornée à 0.162.1"
   );
+  assert.ok(codex.includes("Seen earlier on macOS on 2026-10-21 with codex-cli 0.163.0"), "Codex : ce que la sonde du 21/10 a vu porte sa date et sa version");
+  assert.ok(codex.includes("**Verified on macOS on 2026-10-22 with codex-cli 0.163.0**"), "Codex : la marche du 22/10 porte sa date et sa version");
   // Comme la section agy le fait pour 1.4.2.
   assert.ok(plat(sectionDe(lireLaDoc(), /^## [^\n]*Antigravity/m)).includes("Not tested: agy 1.4.2;"), "agy : le précédent");
+});
+
+// 1.1.0 — LA SONNETTE CODEX : la sous-section dit ce qui est livré, ce qui a été
+// vu le 2026-10-22 (le hook livré, la porte et l'installeur dans un TUI vivant sur
+// une maison jetable) et le 2026-10-21, ce qui ne l'a pas été (une maison
+// ordinaire, les hooks dans l'app de bureau, l'approbation `/hooks` des hooks que
+// l'installeur écrit, l'ouverture d'une app fermée), et chaque fait a son oracle dans l'arbre : le hook et
+// son gabarit, la porte du Facteur, l'enveloppe, l'installeur qui tourne (un
+// dry-run dans un HOME et un CODEX_HOME jetables). `sonnette-codex-impossible`
+// y est une raison de TOURNÉE, jamais un `attente.motif`.
+test("Codex : la sous-section « hooks and the doorbell » — les trois pièces, l'enveloppe sans corps, Échap, le clone au démarrage, le smoke test", async () => {
+  const doc = lireLaDoc();
+  const debut = doc.indexOf("\n### Codex: hooks and the doorbell");
+  assert.ok(debut >= 0, "la sous-section existe");
+  assert.ok(debut > doc.search(/^## [^\n]*Codex/m) && debut < doc.search(/^## [^\n]*Gemini/m), "elle vit dans la section Codex, avant Gemini");
+  const sonnette = plat(doc.slice(debut, doc.indexOf("\n## ", debut + 4)));
+  // Revue de la Tâche 12, finding 4, puis la marche du 22/10/2026 sur un Codex jetable : le hook
+  // livré, la porte et la sortie de l'installeur ont tourné en direct, une fois, sur une maison
+  // jetable. Le statut est le premier des deux, daté, avec ses conditions et ce qui n'a pas été vu.
+  assert.ok(sonnette.trimStart().startsWith("### Codex: hooks and the doorbell **Verified on macOS on 2026-10-22 with codex-cli 0.163.0**"), "le statut de la sous-section : vu en direct le 22/10/2026");
+  assert.ok(!sonnette.includes("Not yet seen live"), "le troisième statut n'existe plus");
+  assert.match(sonnette, /Not tested: a regular Codex home/, "la sous-section dit ce qui n'a pas été vu");
+  assert.ok(!sonnette.includes("and its children"), "le couperet ne promet pas tous les descendants (finding 3)");
+  for (const fait of [
+    "`src/hooks/codex/codex-hook.js`", "`scripts/codex/hooks.template.json`", "`src/facteur/porte-codex.js`", "`src/lib/sonnette.js`",
+    "`[features] hooks = true`", "`--serves <name>`", "`VALXOS_SELF`", "`[mcp_servers.valxos_messenger]`",
+    "`<office>/codex/<lineage>.json`", "`0600`",
+    "`codex queue --thread <thread_id> --message <envelope>`", "`CODEX_HOME`", "5 s",
+    "`open codex://threads/<uuid>`", "`lsappinfo find bundleid=com.openai.codex`", "`VALXOS_CODEX_PORTE=cli`", "`VALXOS_CODEX_OUVRIR_APP=0`",
+    "`tournee.reason`", "`sonnette-codex-impossible`", "`sonnette-codex-differee`", "`codex-fil-sans-session`",
+    "no body ever enters it", "cut at 60 characters",
+    "`valxos-messenger install --codex --self your-agent-name", "`--write`", "`--porte app|cli`", "`--codex-home <path>`", "`/hooks`", "`--dangerously-bypass-hook-trust`",
+    "`github.com/openai/plugins`", "`$CODEX_HOME/.tmp/plugins`", "`no rollout found`",
+    "`VALXOS_GARDE_BUREAU=1`", "the installer never writes the guard",
+    "`codex --version`", "`tmp/arg0-macos`", "`valxos-doctor --reap`", "24 h",
+    "after **Escape** in the TUI the queue freezes",
+    "kills its process group after 5 s (a grandchild that left the group, with `setsid`, survives)",
+    "(`no rollout found`; during that first turn, not measured)",
+    "`proc_start`", "`cwd`", "`dead_at`", "`CC2CC_SELF`",
+    "the hooks serve a rung letter at once",
+    "a letter the queue took is never rung again",
+    "Not tested:", "`test/codex-hook.test.js`", "`test/porte-codex.test.js`",
+    "the hooks in the desktop app", "the `/hooks` approval of the hooks the installer writes",
+    "### Smoke test (Codex doorbell)"
+  ]) assert.ok(sonnette.includes(fait), `Codex, la sonnette : ${fait}`);
+  assert.doesNotMatch(sonnette, /attente\.motif: "sonnette-codex-impossible"/, "la raison de tournée n'est jamais un attente.motif");
+  // Les oracles.
+  const { argumentsDeSonnette, lienDuFil, MOTIF_SONNETTE_IMPOSSIBLE, MOTIF_SONNETTE_DIFFEREE, BUNDLE_APP_CODEX } = await import("../src/facteur/porte-codex-regles.js");
+  assert.deepEqual(argumentsDeSonnette({ thread_id: "t" }, "e"), ["queue", "--thread", "t", "--message", "e"], "la sonnette est codex queue --thread --message");
+  assert.equal(lienDuFil("u"), "codex://threads/u", "la porte ouvre l'app sur le fil");
+  assert.deepEqual([MOTIF_SONNETTE_IMPOSSIBLE, MOTIF_SONNETTE_DIFFEREE, BUNDLE_APP_CODEX], ["sonnette-codex-impossible", "sonnette-codex-differee", "com.openai.codex"], "les raisons et l'app viennent du code");
+  assert.ok(read("src/facteur/porte-codex.js").includes('"codex-fil-sans-session"'), "le détail vient du code");
+  assert.match(read("src/facteur/porte-codex.js"), /process\.kill\(-/, "le couperet tue le groupe de l'enfant");
+  const { GRACE_APRES_SONNETTE_MS } = await import("../src/hooks/codex/harness-common.js");
+  assert.equal(GRACE_APRES_SONNETTE_MS, 0, "le hook Codex sert une lettre sonnée sans grâce");
+  const gabarit = JSON.parse(read("scripts/codex/hooks.template.json"));
+  for (const [evenement, delai] of [["SessionStart", 10], ["UserPromptSubmit", 5], ["PostToolUse", 5], ["Stop", 5]]) {
+    const [groupe] = gabarit.hooks[evenement];
+    assert.equal(groupe.hooks[0].timeout, delai, `le gabarit déclare ${evenement}, ${delai} s`);
+    assert.match(groupe.hooks[0].command, /^env VALXOS_SELF=__SELF__ VALXOS_MESSENGER_HOME=__BUREAU__ __PORTE__ __NODE__ __PAQUET__\/src\/hooks\/codex\/codex-hook\.js --serves __SELF__$/, `${evenement} : l'identité et le bureau en ligne, --serves`);
+  }
+  assert.ok(sonnette.includes("10 s for `SessionStart`, 5 s for the three others"), "la doc dit les délais du gabarit");
+  const { enveloppeDeSonnette } = await import("../src/lib/sonnette.js");
+  const exemple = enveloppeDeSonnette([{ sender: "alice", affichage: { chaise_nom: "atelier" }, table_nom: "team-test", subject: "Beat 7", priority: "normal", body: "BODY" }], { destinataire: "your-agent-name", autresNonLues: 2 });
+  assert.ok(sonnette.includes(exemple), `l'enveloppe d'exemple est celle que le code écrit : ${exemple}`);
+  // L'installeur qui tourne écrit ce que la doc dit : un dry-run ne touche à rien.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "valxos-doc-codex-"));
+  try {
+    const codexHome = path.join(home, "codex-home");
+    fs.mkdirSync(codexHome);
+    const sortie = spawnSync(process.execPath, [path.join(repo, "scripts/install.js"), "--codex", "--self", "your-agent-name", "--codex-home", codexHome], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, HOME: home, VALXOS_MESSENGER_HOME: path.join(home, "office"), CC2CC_GARDE_BUREAU: "1" }
+    });
+    assert.equal(sortie.status, 0, sortie.stderr);
+    assert.match(sortie.stdout, /\[mcp_servers\.valxos_messenger\]/, "la clef MCP que la doc écrit est celle de l'installeur");
+    assert.match(sortie.stdout, /default_tools_approval_mode = "approve"/, "et le réglage d'approbation");
+    assert.doesNotMatch(sortie.stdout, /GARDE_BUREAU/, "l'installeur n'écrit jamais la garde");
+    assert.deepEqual(fs.readdirSync(codexHome), [], "le dry-run n'a rien écrit");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// 1.1.0 — TREIZE OUTILS, ET LA FORME DE `envoi_status` : la phrase d'ouverture
+// compte ce que le serveur enregistre, et la ligne d'`envoi_status` nomme
+// `tournee` que le serveur rend.
+test("la page compte les outils comme le serveur les enregistre, et `envoi_status` dit `tournee`", () => {
+  const serveur = read("src/mcp-server/server.js");
+  const enregistres = [...serveur.matchAll(/server\.registerTool\(\s*"([a-z_]+)"/g)].length;
+  const MOTS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen"];
+  const doc = plat(lireLaDoc());
+  assert.ok(doc.includes(`gets the same ${MOTS[enregistres]} tools`), `la page dit ${MOTS[enregistres]} outils`);
+  assert.doesNotMatch(doc, /the same nine tools/, "plus de « nine tools » au présent");
+  assert.match(serveur, /tournee: tourneeDe\(row\.msg_id\)/, "sonde : envoi_status rend tournee");
+  const ligne = lireLaDoc().split("\n").find((l) => l.startsWith("| `envoi_status` |"));
+  assert.ok(ligne && ligne.includes("`tournee`") && ligne.includes("`{ state, reason, at }`"), "la ligne d'envoi_status dit tournee et sa forme");
+});
+
+// LE CONTRAT DES CHAISES HERMES (1.1.0, Tâche 2) : écrit, pas codé. Pas de
+// fiche ; la ligne du registre porte tout — `house` = le chemin absolu de
+// HERMES_HOME, `metadata_json.harnais = "hermes"` — la clef que la chaise
+// Codex porte déjà et que `porteDeLaChaise` lit (registry.js), jamais une
+// clef `door` de plus. La porte Hermes du Facteur vient avec la 1.2.0 : la
+// page ne la promet pas pour celle-ci. Les colonnes et la clef citées sont
+// celles du code, lues dans le code.
+test("Hermes : le contrat de la chaise au registre est écrit — pas de fiche, `house` = HERMES_HOME, `metadata_json.harnais` = hermes, la porte en 1.2.0", () => {
+  const hermes = plat(sectionDe(lireLaDoc(), /^## [^\n]*Hermes/m));
+  for (const fait of [
+    "### A Hermes chair in the registry (contract; the Facteur's door comes later)",
+    "**No card file.**",
+    "**`house`** is the absolute path of the chair's `HERMES_HOME`",
+    "**`metadata_json.harnais`** is `\"hermes\"`: the key a Codex chair's row already carries (with `\"codex\"`)",
+    "The Facteur's Hermes door (ringing a Hermes chair through its lineage's socket) is not in this release; it is planned for 1.2.0.",
+    "the chair collects it with `inbox` or `valxos-inbox`"
+  ]) assert.ok(hermes.includes(fait), `Hermes : ${fait}`);
+  const schema = read("src/lib/database.js");
+  assert.match(schema, /\bmetadata_json TEXT\b/, "sonde : la colonne metadata_json existe au registre");
+  assert.ok(!hermes.includes("metadata_json.door"), "Hermes : le contrat ne nomme pas une clef `door` que le code ne lit pas");
+  const registre = read("src/lib/registry.js");
+  assert.match(registre, /\bid, lineage, house, instance_session_id\b/, "sonde : la colonne house existe au registre");
+  assert.match(registre, /meta\.harnais !== "codex"/, "sonde : porteDeLaChaise lit la clef `harnais`, celle que le contrat nomme");
+  for (const source of ["src/lib/registry.js", "src/facteur/round.js"]) {
+    assert.doesNotMatch(read(source), /["']hermes["']/, `${source} : la porte Hermes n'est pas codée dans cette release (la page dit 1.2.0)`);
+  }
 });
 
 test("Hermes : la CLI sait accuser, la page le montre — `valxos-inbox --ack <msg_id>`", () => {

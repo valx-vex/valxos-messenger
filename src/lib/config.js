@@ -46,6 +46,15 @@ export const DEFAULT_REDELIVER_AFTER_MS = Number(
   valeurDeLEnvironnement(process.env, "CC2CC_REDELIVER_AFTER_MS") || 600_000
 );
 
+// LE PLAFOND DU RE-SERVICE (1.1.0, Tâche 8). La fenêtre d'une lettre jamais accusée DOUBLE à
+// chaque re-service (10, 20, 40 minutes…) et s'arrête ici : une heure. Fini, jamais infini — une
+// croissance sans borne serait une quarantaine déguisée, et A9 l'interdit (la même règle que
+// l'ajournement du Facteur, `ajournementMaximalMs`). Un seuil, donc de la configuration, jamais
+// du dur ; `VALXOS_REDELIVER_CAP_MS` vient avec, par `clefValxos`.
+export const DEFAULT_REDELIVER_CAP_MS = Number(
+  valeurDeLEnvironnement(process.env, "CC2CC_REDELIVER_CAP_MS") || 3_600_000
+);
+
 // ───────────────────────────── L'INVENTAIRE DES MAISONS (amendement A4) ─────
 //
 // « Une maison absente de la configuration du démon produit une attente infinie
@@ -63,6 +72,15 @@ export const DEFAULT_REDELIVER_AFTER_MS = Number(
 // `CC2CC_MAISONS`), et une déclaration remplace le défaut entier. Le moniteur
 // Python porte la même règle (`known_houses`, valxos_monitor.py) ; un test
 // compare les deux, cas par cas.
+//
+// LES RUES (1.1.0) : une entrée déclarée qui finit par `/*` est une rue —
+// chaque DOSSIER directement sous ce chemin est une maison (un lien vers un
+// dossier aussi). Les fichiers et les liens cassés sont ignorés ; une rue
+// absente ou illisible ne rend rien, sans lever. L'ordre est celui du tri
+// (unités UTF-16, le `sort()` de JavaScript ; le Python trie pareil). Une
+// entrée sans `/*` garde son sens, et rien d'autre n'est développé (ni `~` ni
+// `$HOME`). La rue se relit à chaque appel : une maison née après le démarrage
+// du Facteur est vue à la tournée suivante.
 export const MAISONS_PAR_DEFAUT = [".claude"];
 
 export function maisonsConnues({ env = process.env, home = null } = {}) {
@@ -70,7 +88,28 @@ export function maisonsConnues({ env = process.env, home = null } = {}) {
     .split(path.delimiter)
     .map((maison) => maison.trim())
     .filter(Boolean);
-  if (declarees.length > 0) return declarees;
+  if (declarees.length > 0) {
+    return declarees.flatMap((entree) => {
+      if (!entree.endsWith("/*")) return [entree];
+      const rue = entree.slice(0, -1);
+      let noms;
+      try {
+        noms = fs.readdirSync(rue);
+      } catch {
+        return [];
+      }
+      return noms
+        .sort()
+        .map((nom) => path.join(rue, nom))
+        .filter((maison) => {
+          try {
+            return fs.statSync(maison).isDirectory();
+          } catch {
+            return false;
+          }
+        });
+    });
+  }
   const racine = home || domicile({ env });
   const maisons = MAISONS_PAR_DEFAUT.map((nom) => path.join(racine, nom));
   const designee = String(env.CLAUDE_CONFIG_DIR || "").trim();
@@ -136,7 +175,19 @@ export const REGLAGES_FACTEUR_PAR_DEFAUT = {
   // 60 s : la fenêtre pendant laquelle un démon FIGÉ (vivant mais pendu) peut
   // passer inaperçu. La passe adverse a refusé 5 min ; plus court que 60 s,
   // c'est le journal bavard qu'on vient d'éteindre.
-  battementChaqueMs: 60_000
+  battementChaqueMs: 60_000,
+  // LA PORTE CODEX (1.1.0, spec B §7, B2) : quand `codex queue` répond que
+  // personne ne tient le fil d'une chaise Codex, le Facteur OUVRE l'app sur ce
+  // fil (`open codex://threads/<uuid>`, macOS), une fois par lettre au plus.
+  // `VALXOS_CODEX_OUVRIR_APP=0` laisse l'app fermée : la lettre attend que le
+  // fil s'ouvre, et les hooks la servent au prochain tour (A9).
+  ouvrirLAppCodex: true,
+  // LE RETOUR À L'EXPÉDITEUR (1.1.0, Tâche 3) : une lettre vers un nom que personne n'a JAMAIS
+  // porté, qui attend depuis ce délai, revient à son expéditeur (src/facteur/retour.js). Elle
+  // ne disparaît pas pour autant : elle reste au bureau et arrive si quelqu'un prend ce nom.
+  // L'environnement le dit en SECONDES (`VALXOS_RETOUR_APRES_S`), le réglage en millisecondes.
+  // 0 éteint les retours : aucun balayage.
+  retourApresMs: 900_000
 };
 
 // La marge exigée entre le bail et la durée maximale d'un dépôt : un bail qui
@@ -192,7 +243,11 @@ export function reglagesDuFacteur(env = process.env) {
     ),
     battementChaqueMs: nombreDeLEnvironnement(
       env, "CC2CC_FACTEUR_BATTEMENT_CHAQUE_MS", REGLAGES_FACTEUR_PAR_DEFAUT.battementChaqueMs
-    )
+    ),
+    // Un drapeau, pas un nombre : seul « 0 » éteint ; absent, vide ou autre, c'est le défaut.
+    ouvrirLAppCodex: String(valeurDeLEnvironnement(env, "CC2CC_CODEX_OUVRIR_APP") ?? "").trim() !== "0",
+    retourApresMs:
+      1000 * nombreDeLEnvironnement(env, "CC2CC_RETOUR_APRES_S", REGLAGES_FACTEUR_PAR_DEFAUT.retourApresMs / 1000)
   };
 }
 
@@ -292,6 +347,12 @@ export function verifierLesReglages(reglages) {
       `battementChaqueMs must be a FINITE, strictly positive delay (got: ${reglages.battementChaqueMs})`
     );
   }
+  // Le délai de retour : 0 ÉTEINT les retours (aucun balayage, round.js) — l'arrêt qu'un
+  // opérateur attend, au lieu d'un Facteur qui refuse de partir (vague finale, 21/11). Négatif,
+  // il ne veut rien dire ; infini, il ne renverrait jamais rien sans le dire. Fini, et 0 ou plus.
+  if (!fini(Number(reglages.retourApresMs)) || Number(reglages.retourApresMs) < 0) {
+    plaintes.push(`retourApresMs must be a FINITE delay, 0 (returns off) or more (got: ${reglages.retourApresMs})`);
+  }
   if (plaintes.length > 0) {
     throw new Error(`facteur: inconsistent settings: ${plaintes.join("; ")}`);
   }
@@ -302,6 +363,22 @@ export function verifierLesReglages(reglages) {
 // l'orchestrateur d'un run pose UNE fois : tout descendant qui tenterait
 // d'ÉCRIRE dans un bureau par défaut sans home explicite refuse bruyamment.
 export const GARDE_BUREAU_ENV = "CC2CC_GARDE_BUREAU";
+
+// LA GARDE SOUS SES DEUX NOMS (1.1.0, Tâche 11). La doc de câblage fait écrire
+// `VALXOS_GARDE_BUREAU = "1"` dans le bloc env des clients. La lecture vit ICI,
+// une fois : qui a armé la garde, et sous quel nom. L'une ou l'autre clef
+// suffit ; une clef posée VIDE compte pour absente et ne masque jamais l'autre
+// (fail-closed : la règle de `bureauExplicite` pour le bureau, pas celle de
+// `valeurDeLEnvironnement`). `database.js` nomme la clef rendue dans son refus.
+// `env[GARDE_BUREAU_ENV]` est la forme que l'ancre de lecture de
+// test/docs-mcp-clients.test.js reconnaît : ne pas la réécrire en boucle.
+export const GARDE_BUREAU_ENV_VALXOS = clefValxos(GARDE_BUREAU_ENV);
+
+export function gardeDuBureau(env = process.env) {
+  if (String(env[GARDE_BUREAU_ENV_VALXOS] ?? "").trim() !== "") return { active: true, clef: GARDE_BUREAU_ENV_VALXOS };
+  if (String(env[GARDE_BUREAU_ENV] ?? "").trim() !== "") return { active: true, clef: GARDE_BUREAU_ENV };
+  return { active: false, clef: null };
+}
 
 // LE DOMICILE (N5, seconde passe adverse, 28/09). `HOME=` (posé mais vide —
 // `env -i HOME=`, des bacs à sable, des runners) rendait `os.homedir()` vide :
@@ -388,6 +465,19 @@ export function codeDeSortieSurBureauRelatif(code) {
   codeDuRefusDeBureau = code;
 }
 
+// LA LIGNE DE COMPATIBILITÉ, UNE FOIS PAR SESSION (1.1.0, Tâche 8). « Une fois par processus »
+// (`REPLIS_HISTORIQUES_ANNONCES`) suffisait au Facteur, au serveur MCP et à la porte web, qui
+// vivent longtemps. Un hook est un processus NEUF à chaque appel d'outil et à chaque Stop : la
+// même ligne, des centaines de fois par session, sur un stderr que Claude Code montre — et devant
+// le JSON d'un blocage du Stop. SessionStart la dit ; PostToolUse et Stop l'appellent avant
+// d'ouvrir le bureau et se taisent. Seule la ligne de COMPATIBILITÉ se tait : « unproven office
+// ignored » nomme un défaut à corriger, elle reste. Un interrupteur de processus, comme
+// `codeDeSortieSurBureauRelatif` : il ne se rallume pas.
+let ligneDeCompatibiliteTue = false;
+export function taireLaLigneDeCompatibilite() {
+  ligneDeCompatibiliteTue = true;
+}
+
 function refuserLeBureauRelatif(clef, valeur) {
   process.stderr.write(`${ligneBureauRelatif(clef, valeur)}\n`);
   process.exit(codeDuRefusDeBureau);
@@ -451,13 +541,17 @@ export function baseDir({
   if (raison === "historique" && !REPLIS_HISTORIQUES_ANNONCES.has(racine)) {
     REPLIS_HISTORIQUES_ANNONCES.add(racine);
     const nouveau = path.join(home, ".valxos-messenger");
-    annoncer(
-      nonProuve
-        ? `VALXOS Messenger: unproven office ignored - ${nonProuve} is neither a symlink to ${racine} ` +
-            `nor marked ${MARQUEUR_BUREAU}; using historical runtime ${racine}.\n`
-        : `VALXOS Messenger: compatibility - using historical runtime ${racine}; ` +
-            `the new default is ${nouveau}. Run valxos-migrate-home to copy explicitly.\n`
-    );
+    if (nonProuve) {
+      annoncer(
+        `VALXOS Messenger: unproven office ignored - ${nonProuve} is neither a symlink to ${racine} ` +
+          `nor marked ${MARQUEUR_BUREAU}; using historical runtime ${racine}.\n`
+      );
+    } else if (!ligneDeCompatibiliteTue) {
+      annoncer(
+        `VALXOS Messenger: compatibility - using historical runtime ${racine}; ` +
+          `the new default is ${nouveau}. Run valxos-migrate-home to copy explicitly.\n`
+      );
+    }
   }
   return racine;
 }
@@ -538,10 +632,69 @@ export function hostnameFallback() {
 // rend une identité DÉCLARÉE vérifiable contre elle : si `derive` pouvait
 // lui-même être influencé par ce qu'on déclare, il n'y aurait plus de
 // repère du tout.
+// S10 (seconde passe adverse ; ruling : AUCUNE IDENTITÉ QUE LA 1.0.0 ACCEPTAIT
+// NE CHANGE EN 1.1.0). La 1.0.0 rendait la valeur BRUTE de l'environnement, et
+// le guichet MCP comme la CLI relevaient le courrier sous elle. A3 la
+// normalisait (l'alphabet des hooks, 64 caractères) : `alice opus` devenait
+// `alice_opus`, et une base 1.0.0 ne relevait plus sa lettre, en silence. La
+// valeur reste donc brute. La borne d'A3 reste, mais en REFUS : une partie (la
+// lignée, ou ce qui suit son premier `#` ou `@`) de plus de 64 caractères, ou
+// une lignée vide (`#foo`, m5 : jamais un repli sur la valeur suivante ni sur
+// le nom d'hôte pour une valeur FOURNIE), n'est pas une identité que ce paquet
+// prend. `deriveSelf` lève alors `identite-invalide` ; le serveur MCP et chaque
+// CLI le disent au démarrage (`refusDeLIdentiteDerivee`, cli-common.js) et ne
+// font rien. Les hooks gardent leur règle de la 1.0.0 (ils normalisent) : la
+// divergence d'un nom hors de leur alphabet est d'avant, dite dans Known
+// limitations ; seule une lignée vide les fait répondre `{}` (identity.js).
+export const IDENTITE_PARTIE_MAX = 64;
+
+// La lignée d'une valeur fournie est-elle vide (`#foo`, ` @bar`, `#`) ?
+export function identiteSansLignee(valeur) {
+  const brut = String(valeur ?? "");
+  const coupe = brut.search(/[#@]/);
+  return coupe >= 0 && brut.slice(0, coupe).trim() === "";
+}
+
+// Pourquoi cette valeur n'est pas une identité, ou null. Le refus ne recopie
+// que 40 points de code du nom, contrôles effacés : un nom de 2 000 caractères
+// ne se recopie pas en entier dans un message.
+export function motifDIdentiteInvalide(valeur) {
+  const brut = String(valeur ?? "");
+  const points = [...brut];
+  const cite = JSON.stringify(points.slice(0, 40).join("").replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ") + (points.length > 40 ? "…" : ""));
+  const coupe = brut.search(/[#@]/);
+  if (identiteSansLignee(brut)) {
+    return `the derived identity ${cite} starts with "${brut[coupe]}": its lineage is empty`;
+  }
+  for (const partie of coupe < 0 ? [brut] : [brut.slice(0, coupe), brut.slice(coupe + 1)]) {
+    const longueur = [...partie].length;
+    if (longueur > IDENTITE_PARTIE_MAX) {
+      return `a part of the derived identity ${cite} is ${longueur} characters long; ${IDENTITE_PARTIE_MAX} at most ` +
+        `for the lineage and for what follows its first "#" or "@" (set VALXOS_SELF to a shorter name)`;
+    }
+  }
+  return null;
+}
+
 export function deriveSelf() {
-  return valeurDeLEnvironnement(process.env, "CC2CC_SELF")
-    || valeurDeLEnvironnement(process.env, "CC2CC_SESSION_NAME")
-    || hostnameFallback();
+  const brut = valeurDeLEnvironnement(process.env, "CC2CC_SELF")
+    || valeurDeLEnvironnement(process.env, "CC2CC_SESSION_NAME");
+  if (!brut) return hostnameFallback();
+  const motif = motifDIdentiteInvalide(brut);
+  if (motif) throw Object.assign(new Error(motif), { code: "identite-invalide" });
+  return brut;
+}
+
+// Le refus de l'identité dérivée, ou null : ce que le serveur MCP et la CLI
+// disent au démarrage, avant d'ouvrir le bureau.
+export function refusDeLIdentiteDerivee() {
+  try {
+    deriveSelf();
+    return null;
+  } catch (erreur) {
+    if (erreur?.code === "identite-invalide") return erreur.message;
+    throw erreur;
+  }
 }
 
 // D'où vient le nom qu'on dérive. Un refus muet sur son origine envoie

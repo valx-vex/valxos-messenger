@@ -4,7 +4,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { garderLEcritureDuBureau, getCopiesPourChaise, getPeerBySessionId, registerPeer } from "./database.js";
+import { adressesCourtesEnAttente, garderLEcritureDuBureau, getCopiesPourChaise, getPeerBySessionId, registerPeer } from "./database.js";
 import {
   appendLog,
   hostnameFallback,
@@ -22,6 +22,8 @@ import {
   SEPARATEUR_SESSION,
   chaiseTenanteDeLaLignee,
   deciderLaCopie,
+  deciderLaCopieAuRegistre,
+  ficheLisible,
   getInstanceBySession,
   instanceId,
   listerAnciensNoms,
@@ -192,10 +194,53 @@ function estPourMoi(db, adresse, sessionId) {
   return resolution.targets[0].instance_session_id === sessionId;
 }
 
+// ── UN APPEL SERVI N'EST PAS UNE CHAISE (la chasse du 16/11, cas P2) ────────
+// Claude Code 2.1.325 exécute un appel d'outil servi pour une autre session
+// dans le processus HÔTE, avec `session_id: "served:<appelant>"`. Il partage
+// donc le PID de la chaise qui l'héberge — la règle du même processus lui
+// donnerait la lettre de la lignée — et s'inscrirait comme chaise
+// `lignée#served:…`. Il ne relève rien, ne marque rien, n'inscrit rien.
+export function estUnAppelServi(sessionId) {
+  return String(sessionId ?? "").startsWith("served:");
+}
+
+// ── LA LIGNÉE EST-ELLE TENUE PAR UNE AUTRE CHAISE ? (la chasse du 16/11) ────
+//
+// La question que les crochets posent avant de relever le nom nu d'une lignée.
+// Elle n'a pas de règle à elle : c'est la branche « cc » de `deciderLaCopie`
+// (registry.js, la règle de la 1.1.0), nourrie des faits que cette règle pure
+// ne lit pas elle-même — la résolution du nom au guichet, le pid de MA chaise.
+// Vrai seulement quand le guichet mène la lignée à UNE chaise de cette lignée
+// qui n'est pas la mienne, qui ne vit pas dans mon processus, et qu'on sait
+// VIVANTE (`verdictDeChaise`). Non partout ailleurs, et en particulier :
+//   · quand PERSONNE ne la tient (ambiguë, ou sa désignée est morte) : la 1.1.0
+//     tient alors la lettre pour la lignée (copie « sans-chaise-designee ») ;
+//   · quand la cible est indécidable (sans PID, sonde muette) : chaque chaise
+//     garde le nom nu (A8) ;
+//   · quand l'autre Mac la tient : c'est `laLigneeEstTenueAilleurs` (registry.js).
+// `adressesDuRepli` lit la MÊME décision (`laCopieDeMaChaise`) pour le nom nu.
+// Un appel servi n'est pas une chaise : pour lui, la question ne se pose pas
+// (non) — et ce non n'ouvre aucune boîte : `adressesDuRepli` ne lui en donne
+// aucune, et les crochets le refusent avant (`hookContext`).
+export function laLigneeEstTenueParUneAutre(db, sessionId, cible) {
+  if (!sessionId || estUnAppelServi(sessionId)) return false;
+  const lignee = String(cible ?? "").trim();
+  if (!lignee) return false;
+  return laCopieDeMaChaise(db, lignee, sessionId).raison === "cc";
+}
+
+// La décision de la copie pour la chaise de CETTE session, ses faits lus au
+// registre (`deciderLaCopieAuRegistre` : la résolution, et l'état de la cible).
+function laCopieDeMaChaise(db, lignee, sessionId, maFiche = getInstanceBySession(db, sessionId)) {
+  return deciderLaCopieAuRegistre(db, { lignee, sessionId, pidDeMaChaise: maFiche?.pid ?? null });
+}
+
 export function adressesDuRepli(db, selfId, hookInput = {}) {
   const lignee = String(selfId || "").trim();
   const adresses = [];
   const sessionId = hookInput.session_id || hookInput.sessionId || null;
+  // Un appel servi n'est pas une chaise : aucune boîte (ni le nom nu, ni `lignée#served:…`).
+  if (estUnAppelServi(sessionId)) return adresses;
   // 27/09 : le courrier de la LIGNÉE est à la chaise désignée, pas à toutes ses chaises.
   // On retire la lignée de MA boîte exactement quand elle n'est pour moi qu'une
   // COPIE (`deciderLaCopie`) : une autre chaise vivante de ma lignée la tient,
@@ -205,8 +250,11 @@ export function adressesDuRepli(db, selfId, hookInput = {}) {
   // doublon à une lettre perdue). Plus étroit que `estPourMoi` à dessein : ce
   // dernier retirait aussi la lignée d'une session dont la chaise n'est pas
   // encore inscrite, et la lettre n'était alors plus à personne.
-  const pourUnAutre = sessionId && lignee
-    && deciderLaCopie({ lignee, sessionId, resolution: resolveRecipient(db, lignee) }).copie;
+  // Le pid vient de MA fiche (`touchSelf` l'a inscrite avant) : la règle du même processus.
+  // La décision est celle que lit `laLigneeEstTenueParUneAutre` (`laCopieDeMaChaise`) :
+  // une règle, deux lectures.
+  const maFiche = sessionId ? getInstanceBySession(db, sessionId) : null;
+  const pourUnAutre = sessionId && lignee && laCopieDeMaChaise(db, lignee, sessionId, maFiche).copie;
   if (lignee && !pourUnAutre) adresses.push(lignee);
 
   let chaise = null;
@@ -214,7 +262,7 @@ export function adressesDuRepli(db, selfId, hookInput = {}) {
     if (lignee) adresses.push(instanceId(lignee, sessionId));
     // Une chaise enregistrée sous un autre nom (maison renommée, fiche héritée)
     // garde son adresse : on va chercher son courrier aussi.
-    chaise = getInstanceBySession(db, sessionId);
+    chaise = maFiche;
     if (chaise?.id) adresses.push(chaise.id);
   }
 
@@ -230,6 +278,21 @@ export function adressesDuRepli(db, selfId, hookInput = {}) {
   if (lignee && nomHumain) {
     const adresse = `${lignee}${SEPARATEUR_SESSION}${nomHumain}`;
     if (estPourMoi(db, adresse, sessionId)) adresses.push(adresse);
+  }
+
+  // ③ Mes formes COURTES, `lignée#<8 hexadécimaux ou plus>` — celle que `valxos-peers` et
+  //    `list_peers` montrent (`ficheLisible.chaise`) et qu'un humain retape (1.1.0, Tâche 8). Le
+  //    guichet écrit une lettre à une forme courte UNIQUE sous mon adresse entière ; mais une
+  //    lettre écrite PENDANT une ambiguïté (une jumelle au même début), ou quand personne n'y
+  //    répondait, est restée telle qu'écrite — en majuscules, ou plus longue que huit — et le jour
+  //    où elle mène à moi seule, elle est à moi : A9. D'où la forme montrée, plus toute adresse en
+  //    attente dont le préfixe commence ma session (`adressesCourtesEnAttente`, round 1 de la
+  //    revue). Même garde qu'au « @nom » : seulement si le guichet la ramène à moi, et à moi seule.
+  if (lignee && chaise?.instance_session_id) {
+    const montree = ficheLisible(chaise).chaise;
+    for (const courte of [montree, ...adressesCourtesEnAttente(db, chaise.lineage, chaise.instance_session_id)]) {
+      if (courte && !adresses.includes(courte) && estPourMoi(db, courte, sessionId)) adresses.push(courte);
+    }
   }
 
   // ② Mes ANCIENS noms de famille. Une lettre du 22/07/2026 adressée à l'ancien
@@ -278,20 +341,25 @@ export { deciderLaCopie };
 // La copie d'UNE chaise, lue en base : ce que les hooks ET le guichet MCP
 // servent. La chaise doit être une chaise EN SERVICE de cette lignée — une
 // fiche d'une autre famille ne lit pas le courrier de celle-ci, même en copie.
-export function copiesPourChaise(db, lignee, sessionId, { limit = 20 } = {}) {
+export function copiesPourChaise(db, lignee, sessionId, { limit = 20, msgId = null } = {}) {
   const vide = { rows: [], chaiseId: null, destinataire: null, chaiseDesignee: null, sansChaiseDesignee: false };
   const nom = String(lignee || "").trim();
   if (!nom || !sessionId) return vide;
   const chaise = getInstanceBySession(db, sessionId);
   if (!chaise || chaise.lineage !== nom || ["offline", "dead"].includes(chaise.status)) return vide;
   const resolution = resolveRecipient(db, nom);
-  const verdict = deciderLaCopie({ lignee: nom, sessionId, resolution });
+  const verdict = deciderLaCopieAuRegistre(db, { lignee: nom, sessionId, resolution, pidDeMaChaise: chaise.pid ?? null });
   if (!verdict.copie) return vide;
   const cible = verdict.chaise_designee ? resolution.targets[0] : null;
+  // Tenue sur l'autre Mac (relais) : la copie nomme la chaise de là-bas et son
+  // Mac — jamais « en attente d'une désignation », qui serait faux.
+  const ailleurs = resolution.kind === "distant"
+    ? `${verdict.chaise_designee || "a chair"} on the other Mac (${resolution.mac})`
+    : null;
   return {
-    rows: getCopiesPourChaise(db, nom, chaise.id, { limit }),
+    rows: getCopiesPourChaise(db, nom, chaise.id, { limit, msgId }),
     chaiseId: chaise.id,
-    destinataire: cible ? (cible.session_name ? `${cible.session_name} (${cible.id})` : cible.id) : null,
+    destinataire: ailleurs || (cible ? (cible.session_name ? `${cible.session_name} (${cible.id})` : cible.id) : null),
     chaiseDesignee: verdict.chaise_designee,
     sansChaiseDesignee: verdict.sans_chaise_designee
   };
@@ -308,14 +376,14 @@ export function copiesPourMoi(db, selfId, hookInput = {}, { limit = 20 } = {}) {
 // (passe adverse, 28/09), la même règle que `gardeDeLaCopie` — n'est pour lui
 // qu'une copie. Marque `cc_vu` sous son nom nu. Un client solo (sa seule fiche,
 // sans session) ne voit rien ici : son courrier lui est livré comme avant.
-export function copiesSansChaise(db, lignee, { limit = 20 } = {}) {
+export function copiesSansChaise(db, lignee, { limit = 20, msgId = null } = {}) {
   const vide = { rows: [], chaiseId: null, destinataire: null, chaiseDesignee: null, sansChaiseDesignee: false };
   const nom = String(lignee || "").trim();
   if (!nom || nom.includes("#")) return vide;
   const tenante = chaiseTenanteDeLaLignee(db, nom);
   if (!tenante) return vide;
   return {
-    rows: getCopiesPourChaise(db, nom, nom, { limit }),
+    rows: getCopiesPourChaise(db, nom, nom, { limit, msgId }),
     chaiseId: nom,
     destinataire: tenante.session_name ? `${tenante.session_name} (${tenante.id})` : tenante.id,
     chaiseDesignee: tenante.id,

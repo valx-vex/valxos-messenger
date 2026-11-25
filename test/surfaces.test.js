@@ -6,13 +6,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { FORMES_PRIVEES, identitesDeCetteMachine, modeCI } from "./aide-identites.js";
 import { fautesDansLesFichiers, lignesFautives, motifAdresseEnDur, motifsDansTest, motifsDesNoms, nomsDeLaMaison } from "./aide-noms-maison.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { formatAdditionalContext } from "../src/lib/format.js";
 import { envPropre, poserLeBureau } from "./aide-env.js";
+import { enTubeReel, quote } from "./aide-tube.js";
 
 const repo = path.resolve(new URL("..", import.meta.url).pathname);
 
@@ -285,10 +286,13 @@ test("les commandes portent le produit, et chaque ancien nom reste un alias dép
     ["migrate-v1", "scripts/migrate-v1.js"],
     ["doctor", "src/bin/valxos-doctor.js"],
     ["web", "src/bin/valxos-web.js"],
-    ["migrate-home", "scripts/migrate-home.js"]
+    ["migrate-home", "scripts/migrate-home.js"],
+    // 1.1.0 : le carnet des tables et l'historique exporté.
+    ["table", "src/bin/valxos-table.js"],
+    ["history", "src/bin/valxos-history.js"]
   ]);
 
-  assert.equal(commandes.size, 10, "SONDE IMPOSSIBLE : l'inventaire des commandes a perdu une entrée");
+  assert.equal(commandes.size, 12, "SONDE IMPOSSIBLE : l'inventaire des commandes a perdu une entrée");
   for (const [suffixe, cible] of commandes) {
     assert.equal(pkg.bin[`valxos-${suffixe}`], cible, `valxos-${suffixe} est le nom publié`);
     assert.equal(pkg.bin[`cc2cc-${suffixe}`], cible, `cc2cc-${suffixe} reste l'alias exact, jamais un autre programme`);
@@ -298,8 +302,8 @@ test("les commandes portent le produit, et chaque ancien nom reste un alias dép
   assert.equal(pkg.bin["valxos-messenger"], "src/bin/valxos-messenger.js", "le point d'entrée un-clic est publié");
   assert.equal(
     Object.keys(pkg.bin).length,
-    22,
-    "les 11 noms valxos-* (incluant valxos-messenger), les 10 alias cc2cc-* (dont cc2cc-migrate-home) et facteur forment exactement 22 points d'entrée"
+    27,
+    "les 14 noms valxos-* (incluant valxos-messenger et valxos-relais), les 12 alias cc2cc-* (dont cc2cc-table et cc2cc-history) et facteur forment exactement 27 points d'entrée"
   );
   const verrou = JSON.parse(fs.readFileSync(path.join(repo, "package-lock.json"), "utf8"));
   assert.deepEqual(verrou.packages[""].bin, pkg.bin, "le verrou npm publie exactement les mêmes commandes que le manifeste");
@@ -309,9 +313,9 @@ test("les commandes portent le produit, et chaque ancien nom reste un alias dép
   for (const suffixe of commandes.keys()) assert.match(readmeAnglais, new RegExp(`valxos-${suffixe}\\b`));
   assert.match(readmeAnglais, /valxos-migrate-home\b/);
   assert.match(readmeAnglais, /\bfacteur\b/);
-  assert.match(readmeAnglais, /ten `cc2cc-\*` executables are deprecated aliases/i, "la compatibilité est dite comme dépréciée en anglais");
+  assert.match(readmeAnglais, /twelve `cc2cc-\*` executables are deprecated aliases/i, "la compatibilité est dite comme dépréciée en anglais");
   assert.match(readmeFrancais, /cc2cc-\*[^\n]*dépréciés|dépréciés[^\n]*cc2cc-\*/i, "la version française conserve la même dette nommée");
-  assert.match(readmeAnglais, /22 CLI entry points/, "le README compte tous les exécutables publiés, alias compris");
+  assert.match(readmeAnglais, /27 CLI entry points/, "le README compte tous les exécutables publiés, alias compris");
 
   const installeur = fs.readFileSync(path.join(repo, "scripts/install.js"), "utf8");
   assert.match(
@@ -784,6 +788,62 @@ test("valxos-peers range l'alias parmi les alias, jamais parmi les pairs", async
   assert.equal(sortie.peers.find((p) => p.id === "alice").masque_par_alias, "alice-eternal");
 });
 
+// ── La porte d'une chaise Codex (1.1.0, Tâche 11) ───────────────────────────
+// La fiche de chaise Codex (src/lib/chaise-codex.js) pose `metadata_json =
+// { harnais: "codex", porte }` sur sa carte ; `ficheLisible` le dit à côté de
+// la chaise, donc `valxos-peers` ET `list_peers` — et rien pour une chaise
+// d'un autre harnais.
+test("porteDeLaChaise lit la métadonnée Codex, et rien d'autre", async () => {
+  const { porteDeLaChaise } = await import("../src/lib/registry.js");
+  assert.deepEqual(porteDeLaChaise({ metadata_json: JSON.stringify({ harnais: "codex", porte: "exec" }) }), { harnais: "codex", porte: "exec" });
+  assert.deepEqual(porteDeLaChaise({ metadata_json: JSON.stringify({ harnais: "codex" }) }), { harnais: "codex", porte: "app" }, "une porte non dite se dit app, comme pour le Facteur et le hook (round 1)");
+  for (const metadata_json of [null, "", "{ pas du json", JSON.stringify({ harnais: "autre", porte: "app" }), JSON.stringify(["codex"])]) {
+    assert.equal(porteDeLaChaise({ metadata_json }), null, String(metadata_json));
+  }
+  assert.equal(porteDeLaChaise(null), null);
+});
+
+async function bureauAvecChaiseCodex() {
+  const root = poserLeBureau(fs.mkdtempSync(path.join(os.tmpdir(), "valxos-surfaces-codex-")));
+  const { openDatabase } = await import("../src/lib/database.js");
+  const { registerInstance } = await import("../src/lib/registry.js");
+  const { ecrireFicheCodex } = await import("../src/lib/chaise-codex.js");
+  const db = openDatabase({ file: path.join(root, "broker.db") });
+  ecrireFicheCodex(db, { lineage: "hal-test", thread_id: "thread-1", codex_home: path.join(root, "codex-home"), pid: process.pid, porte: "app" });
+  registerInstance(db, { lineage: "alice", sessionId: "sess-1", pid: process.pid });
+  db.close();
+  return root;
+}
+
+test("valxos-peers et list_peers montrent la porte d'une chaise Codex à côté d'elle, et rien pour les autres", async () => {
+  const root = await bureauAvecChaiseCodex();
+  const cli = JSON.parse(execFileSync("node", [path.join(repo, "src/bin/valxos-peers.js")], {
+    encoding: "utf8",
+    env: { ...envPropre(), CC2CC_V2_HOME: root }
+  }));
+  const client = new Client({ name: "surfaces-porte", version: "0.1.0" });
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: [path.join(repo, "src/mcp-server/server.js")],
+    env: { ...envPropre(), CC2CC_V2_HOME: root, CC2CC_SELF: "surfaces-probe" }
+  });
+  await client.connect(transport);
+  let mcp;
+  try {
+    mcp = JSON.parse((await client.callTool({ name: "list_peers", arguments: {} })).content[0].text);
+  } finally {
+    await client.close();
+  }
+  for (const [surface, res] of [["valxos-peers", cli], ["list_peers", mcp]]) {
+    const chaiseCodex = res.peers.find((p) => p.id === "hal-test");
+    assert.deepEqual([chaiseCodex?.harnais, chaiseCodex?.porte], ["codex", "app"], `${surface} : la porte est dite à côté de la chaise Codex`);
+    const autre = res.peers.find((p) => p.lineage === "alice");
+    assert.ok(autre, `${surface} : SONDE IMPOSSIBLE, la chaise alice manque`);
+    assert.equal(Object.hasOwn(autre, "porte"), false, `${surface} : une chaise d'un autre harnais n'a pas de porte`);
+    assert.equal(Object.hasOwn(autre, "harnais"), false);
+  }
+});
+
 test("README : installation — l'URL GitHub à ton LLM d'abord, npm i -g valxos-messenger ensuite", () => {
   for (const f of ["README.md", "README.fr.md"]) {
     const t = fs.readFileSync(path.join(repo, f), "utf8");
@@ -876,3 +936,48 @@ test("aucune prose française sur une surface lue : CLI, Facteur, moniteur, MCP,
   const prose = relevees.filter((r) => !admis(r)).map((r) => `${r.fichier}:${r.ligne}: ${r.texte.slice(0, 120)}`);
   assert.deepEqual(prose, [], `prose française sur une surface lue :\n${prose.join("\n")}`);
 });
+
+// ── 1.1.0 — LES DEUX BINAIRES NEUFS ONT UNE AIDE SÛRE ────────────────────────
+// `-h` sans ouvrir de bureau, l'aide ENTIÈRE dans un vrai tube (C2 : écriture
+// synchrone avant la sortie), un drapeau inconnu ou un mot nu refusés (2)
+// avant toute base. Même preuve que `valxos-chaise` (test/sortie-unique.test.js).
+for (const bin of ["valxos-table.js", "valxos-history.js"]) {
+  test(`${bin} -h dans un vrai tube : l'aide entière, huit fois sur huit, sortie 0`, () => {
+    const commande = `${quote(process.execPath)} ${quote(path.join(repo, "src/bin", bin))} -h`;
+    const { attendu, rcAttendu, tailles, codes } = enTubeReel(commande);
+    assert.ok(attendu > 512, `sonde impossible : l'aide fait ${attendu} octets, une coupure à 512 ne se verrait pas`);
+    assert.equal(rcAttendu, 0);
+    assert.deepEqual(tailles, Array(8).fill(attendu), "chaque lecture du tube donne l'aide entière");
+    assert.deepEqual(codes, Array(8).fill(0));
+  });
+
+  test(`${bin} --help dans un vrai tube : l'aide entière par le guichet du binaire, huit fois sur huit, sortie 0`, () => {
+    const commande = `${quote(process.execPath)} ${quote(path.join(repo, "src/bin", bin))} --help`;
+    const { attendu, rcAttendu, tailles, codes } = enTubeReel(commande);
+    assert.ok(attendu > 512, `sonde impossible : l'aide fait ${attendu} octets`);
+    assert.equal(rcAttendu, 0);
+    assert.deepEqual(tailles, Array(8).fill(attendu));
+    assert.deepEqual(codes, Array(8).fill(0));
+  });
+
+  test(`${bin} --bogus dans un vrai tube : le refus entier sur stderr, sortie 2`, () => {
+    const commande = `${quote(process.execPath)} ${quote(path.join(repo, "src/bin", bin))} --bogus`;
+    const { attendu, rcAttendu, tailles, codes } = enTubeReel(commande, { flux: "stderr" });
+    assert.ok(attendu > 512, `sonde impossible : le refus (usage compris) fait ${attendu} octets`);
+    assert.equal(rcAttendu, 2);
+    assert.deepEqual(tailles, Array(8).fill(attendu));
+    assert.deepEqual(codes, Array(8).fill(2));
+  });
+
+  test(`${bin} : -h, --help, --bogus et -x n'ouvrent aucun bureau`, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "valxos-aide-sure-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    for (const [args, code] of [[["-h"], 0], [["--help"], 0], [["--bogus"], 2], [["-x"], 2]]) {
+      const r = spawnSync(process.execPath, [path.join(repo, "src/bin", bin), ...args], {
+        encoding: "utf8", timeout: 5000, env: envPropre({ CC2CC_V2_HOME: root, CC2CC_GARDE_BUREAU: "1", CC2CC_SELF: "alice" })
+      });
+      assert.equal(r.status, code, `${bin} ${args.join(" ")} : ${r.stdout}\n${r.stderr}`);
+    }
+    assert.deepEqual(fs.readdirSync(root), [], "le dossier du bureau est resté vide");
+  });
+}

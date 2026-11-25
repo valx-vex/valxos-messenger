@@ -88,7 +88,9 @@ function etatDuRenvoi(db, ancienNom) {
       ? { sert: false, mene_a: null, masque_par: null }
       : { sert: true, mene_a: resolution.alias, masque_par: null };
   }
-  if (resolution.kind === "unknown") {
+  // `distant` (relais) compte comme `unknown` : aucune fiche d'ICI ne masque le
+  // renvoi, et dire « fiche héritée » ferait retirer une fiche qui n'existe pas.
+  if (resolution.kind === "unknown" || resolution.kind === "distant") {
     return { sert: false, mene_a: null, masque_par: null };
   }
   const vivantes = resolution.targets.filter((c) => c.instance_session_id);
@@ -203,6 +205,10 @@ function montrerLignee(db, lignee, json) {
       lignes.push(`To decide:  valxos-chaise designer ${lignee} <session start>`);
       lignes.push("Or, if only one of these chairs is still alive, harvest the dead ones and the mail goes to it:  valxos-chaise moissonner");
     }
+  } else if (resolution.kind === "distant") {
+    // Tenue sur l'autre Mac (relais) : les chaises d'ici n'en voient qu'une copie.
+    const la = resolution.chaise_id ? `${resolution.chaise_id} holds it there` : "a chair there holds it";
+    lignes.push(`Mail addressed to "${lignee}" is carried to the other Mac (${resolution.mac}): ${la}. The chairs here see only a copy.`);
   } else if (designee && designee.id === recoit) {
     lignes.push(`Mail addressed to "${lignee}" goes to ${designee.instance_session_id}.`);
   } else if (resolution.kind === "lineage") {
@@ -254,7 +260,9 @@ function guichet() {
           ? l.designee_morte
             ? "AMBIGUOUS: designated chair dead, re-designate or harvest"
             : "AMBIGUOUS: mail waits"
-          : l.designee
+          : l.kind === "distant"
+            ? "held on the other Mac: mail is carried there"
+            : l.designee
             ? `designated: ${l.designee}`
             : "one chair";
         return `  ${l.lineage.padEnd(largeur)}   ${String(l.chaises).padStart(2)} chair(s)   ${etat}`;

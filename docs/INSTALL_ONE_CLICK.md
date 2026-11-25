@@ -68,6 +68,10 @@ making the whole verdict red.
 | `--launchd-load` | Write the plists and run `launchctl bootstrap` on them (implies `--launchd`) |
 | `--launchd-unload` | With `--uninstall` only: run `launchctl bootout` on the services the uninstall names — ours, and the legacy launchd labels of earlier private installations when a probe confirms them loaded — and `launchctl disable` every legacy label whose plist is in `~/Library/LaunchAgents`, loaded or not. Without it the uninstall only prints the commands |
 | `--operator NAME` | Pin `VALXOS_WEB_OPERATEUR` in the web door's plist; it then takes precedence over `web.env`. Without it the plist carries no operator and `web.env` decides. Only with `--launchd` or `--launchd-load`: given alone it is refused, nothing is done |
+| `--codex --self NAME` | Print the Codex wiring for `NAME` — `[features] hooks = true` and the `[mcp_servers.valxos_messenger]` entry for `config.toml`, the four hooks for `hooks.json` — and change nothing; `--self` is required with `--codex`. A conflict, or a file it cannot read or parse, exits 1. See `docs/MCP_CLIENTS.md`, "Codex: hooks and the doorbell" |
+| `--write` | With `--codex` only: back up `config.toml` and `hooks.json` (dated suffix), merge, print the diff; a value already there is never changed, and a conflict writes nothing |
+| `--codex-home DIR` | With `--codex` only: the Codex home to wire (default `$CODEX_HOME`, else `~/.codex`) |
+| `--porte app\|cli` | With `--codex` only: pin one door in the hook command for every session of that Codex home. Without it each session's `VALXOS_CODEX_PORTE` decides; unset means `app`, and the Facteur may then open the desktop app on a waiting thread |
 
 The Claude Code home receives the plugin symlink: `$CLAUDE_CONFIG_DIR` when
 the launcher sets it, else `~/.claude`.
@@ -79,7 +83,9 @@ the launcher sets it, else `~/.claude`.
 - It does not delete or rewrite the data of an existing office: it opens the
   database once, with the schema and migrations every command applies, and
   `--uninstall` leaves the office alone.
-- It does not create MCP server configuration for non-Claude-Code clients.
+- It does not create MCP server configuration for non-Claude-Code clients,
+  except Codex with `--codex`, which prints by default and writes only with
+  `--write`.
 
 ## Implemented: launchd plists
 
@@ -97,6 +103,7 @@ valxos-messenger install --launchd                    # write the plists, load b
 valxos-messenger install --launchd --operator alice   # the web door's operator
 valxos-messenger install --launchd-load               # write and load them
 valxos-messenger install --dry-run --launchd          # show the exact files, write nothing
+VALXOS_MAISONS="$HOME/.claude:$HOME/agents/*" valxos-messenger install --launchd   # pin the houses the Facteur scans
 ```
 
 ### What a written plist contains
@@ -110,6 +117,7 @@ of the machine it runs on:
 | `__HOME__` | the home directory (`HOME` in the service environment) |
 | `__NODE__`, `__NODE_DIR__` | the `node` that ran the installer, through its **stable** entry point when one exists: the `node` on `PATH` (or the one the operator invoked) whose real path is the running binary — `/opt/homebrew/bin/node` rather than the versioned `…/Cellar/node/<version>/bin/node` that a `brew upgrade node` removes; the binary itself otherwise. launchd starts services with a bare environment, so the plist names a node rather than hoping one is on the path; `__NODE_DIR__` is its directory, first on the service's `PATH`. A plist names a path and launchd does not follow upgrades: re-run `install --launchd` after updating Node, as after moving the repository |
 | `__RUNTIME_HOME__` | the office the daemons serve, pinned as `VALXOS_MESSENGER_HOME`; it is the office the install ran against (`~/.valxos-messenger` by default) |
+| `__VALXOS_MAISONS__` | the houses the Facteur scans, pinned as `VALXOS_MAISONS` in both plists (the web door's `attente` advice uses the same list): the `VALXOS_MAISONS` declaration the installer runs with, written as given, else `<home>/.claude`. An entry ending in `/*` stays as written and the Facteur reads that directory again at each round, so a house created later needs no re-install. `CLAUDE_CONFIG_DIR` is never pinned: under a declaration it is not scanned |
 | `__OPERATOR_ENTRY__` | the web door's `VALXOS_WEB_OPERATEUR` entry when `--operator` was given — the door reads its environment before `web.env`, so a pinned operator takes precedence over the file, and the summary says so; without `--operator` the entry is a comment saying that `web.env` decides. `web.env` is the one place meant to configure the door: the installer never contradicts it in silence, and it warns when neither names an operator, since the door refuses to start without one |
 
 Both services have `RunAtLoad` and `KeepAlive` set. Their output goes to

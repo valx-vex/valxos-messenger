@@ -798,7 +798,9 @@ test("une fiche retirée du service n'est pas « inconnue du registre » — l'a
   });
   assert.equal(vraimentInconnu.statut, 200);
   assert.equal(vraimentInconnu.json.attente.motif, "destinataire-inconnu");
-  assert.match(vraimentInconnu.json.attente.message, /^No peer in service answers to this name: /);
+  // 1.1.0, Tâche 3 : un nom que personne n'a JAMAIS porté le dit tel quel (la fiche retirée,
+  // au-dessus, garde l'avis d'avant : elle a porté son nom).
+  assert.match(vraimentInconnu.json.attente.message, /^No one has this name\. /);
 
   // LE CÂBLAGE : la page pose l'avis du bureau TEL QUEL, sans le découper. Une
   // découpe sur la ponctuation d'une prose casse en silence au premier

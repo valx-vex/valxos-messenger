@@ -15,6 +15,11 @@ export const SERVICES = [
   { label: "com.valxos.messenger.web", program: "src/bin/valxos-web.js" }
 ];
 
+// The relay's service is NOT in SERVICES: it is optional (only
+// `install.js --relais` writes it, on the one Mac that runs the relay), so the
+// default install, the doctor's plist check and `--launchd` never see it.
+export const RELAIS_LABEL = "com.valxos.messenger.relais";
+
 // LEGACY (cc2cc-v2 era): the labels the Facteur and the web door ran under
 // before the rename.  On a machine that migrates they may still be loaded and
 // still hold port 8790, so the installer asks launchctl about them before it

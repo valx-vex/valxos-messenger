@@ -98,6 +98,7 @@ import { fileURLToPath } from "node:url";
 import { seuilsDeSouffrance, validateAgentId } from "../lib/config.js";
 import {
   ackMessage,
+  enrichirPourAffichage,
   getMessageById,
   history,
   lettresEnSouffrance,
@@ -107,7 +108,16 @@ import {
   registerPeer
 } from "../lib/database.js";
 import { etatDeLaLettre } from "../lib/format.js";
-import { posterSousUneClefASoi, posterUneLettre } from "../lib/guichet.js";
+import {
+  borne,
+  codeDeLaCause,
+  interruptionDEnvoi,
+  lettreDeTableRendue,
+  nomDeTableDe,
+  posterAUneTable,
+  posterSousUneClefASoi,
+  posterUneLettre
+} from "../lib/guichet.js";
 import { SEPARATEUR_INSTANCE, SEPARATEUR_SESSION, STATUTS_HORS_SERVICE, libelleStatut } from "../lib/registry.js";
 import { cheminDemande, cookieDuJeton, originesDeCadrage, verdictDeLaPorte } from "./auth.js";
 
@@ -491,7 +501,15 @@ function refuserLEntree(res) {
 export function lettresDeLOperateur(db, operateur, { plafond = PLAFOND_DU_FIL } = {}) {
   // `history` rend les plus RÉCENTES d'abord (c'est ce qu'un plafond doit
   // garder) ; le fil, lui, se lit dans le sens du temps.
-  return history(db, { self: operateur, limit: plafond }).reverse();
+  // L'AFFICHAGE (1.1.0) : la table, le nom de chaise et le rappel se lisent en
+  // base par `enrichirPourAffichage` — la même source que les hooks et
+  // `valxos-inbox`, jamais une deuxième lecture d'ici. Le LECTEUR est
+  // l'opérateur : la position d'une table fermée ne se montre qu'à un membre,
+  // et la règle vit là-bas, une fois. Les colonnes de la ligne restent : la
+  // relève et le flux marquent et comparent sur `msg_id`.
+  // S14 : une lettre fermée que l'opérateur ne lit pas (ni destinataire, ni expéditeur sans chaise,
+  // ni membre de sa table) est omise, comme à l'historique MCP et à la CLI.
+  return enrichirPourAffichage(db, history(db, { self: operateur, limit: plafond, lecteur: { formes: [operateur], chaise: null } }).reverse(), { lecteur: [operateur] });
 }
 
 function compterMonCourrier(db, operateur) {
@@ -583,7 +601,23 @@ export function vueDeLaLettre(row, operateur, cris = new Map()) {
     guichet_a: row.carried_at || null,
     recue_a: arrivees[0] || null,
     accusee_a: row.acked_at || null,
-    en_souffrance: cris.get(row.msg_id) || null
+    en_souffrance: cris.get(row.msg_id) || null,
+    // LA TABLE (1.1.0). `table` est la colonne de la lettre (`table_nom`, une
+    // chaîne, comme l'`inbox` MCP et `valxos-inbox`) ; `table_mode` et
+    // `position` sont l'état COURANT de la table, lu par `enrichirPourAffichage`
+    // (une table ne se supprime jamais : Camp B) — la position est du texte posé
+    // par un membre, elle voyage telle quelle dans le JSON et la page la dessine
+    // échappée. `chaise_nom` est le nom humain de la chaise qui a posté ;
+    // `rappel` le compte des re-services. Rien ne s'invente : sans table, sans
+    // chaise nommée, sans re-service — nul, nul, zéro. La page dessine la table ;
+    // le reste voyage déjà, pour qu'une page de demain n'ait pas à rouvrir l'API.
+    table: row.table_nom ?? null,
+    table_mode: row.affichage?.table?.mode ?? null,
+    position: row.affichage?.table?.position ?? null,
+    chaise_nom: row.affichage?.chaise_nom ?? null,
+    rappel: Number(row.affichage?.rappel) > 0 ? Number(row.affichage.rappel) : 0,
+    envoi_id: row.envoi_id ?? null,
+    reponse_a: row.reponse_a ?? null
   };
 }
 
@@ -906,6 +940,151 @@ export async function deposerPourLOperateur(db, operateur, entree, clefDemandee,
   }
 }
 
+// ── LE DÉPÔT À UNE TABLE (1.1.0) ────────────────────────────────────────────
+//
+// `a: "table:<nom>"` passe par `posterAUneTable` (guichet.js), comme `send` du
+// serveur MCP et `valxos-send --to table:<nom>` : une lettre par membre actif
+// hors des formes de l'expéditeur, liées par un `envoi_id`. Le préfixe se lit
+// au guichet (`nomDeTableDe`, sans casse), jamais une deuxième fois ici. La
+// porte signe l'opérateur ; il est un humain sans chaise (`sender_chaise` nul).
+//
+// GARDE N°2, POUR UNE TABLE. Le guichet dérive la clef d'idempotence par membre
+// (`<msg_id>#<adresse>`) et passe CHAQUE lettre par `posterSousUneClefASoi`
+// (F12) : une dérivée tenue par le courrier d'un tiers est écartée pour cette
+// lettre-là, la lettre part sous une clef générée, et `clef_ecartee` le dit sur
+// elle — la loi des trois portes, écrite une fois. « À soi » s'y juge sur les
+// formes de l'expéditeur ; l'opérateur est une lignée sans session
+// (`validateAgentId` : ni `#` ni `@`), ses formes sont donc son seul nom, et
+// la règle du guichet est exactement `estMonCourrier`.
+// La porte garde pourtant SA question, au seul endroit où elle compte : avant
+// de RENDRE. Une ligne de l'envoi qui ne serait pas au courrier de l'opérateur
+// (le jour où les formes s'élargissent, ou un guichet qui se trompe) ne sort
+// pas : l'envoi se dit interrompu (`clef_indisponible`, rendu en
+// `envoi-interrompu` par `refusDuGuichet`), avec les lettres qui sont VRAIMENT
+// les siennes — jamais la ligne d'autrui, jamais « rien d'écrit » à tort.
+// Rend l'envoi du guichet tel quel : `{ table, envoi_id, count, lettres }`.
+export async function deposerAUneTablePourLOperateur(db, operateur, entree, clefDemandee, deps = {}) {
+  const poster = deps.poster || posterAUneTable;
+  const envoi = await poster(db, { ...entree, msg_id: clefDemandee || undefined }, deps.guichet || {});
+  const etrangere = envoi.lettres.find((lettre) => !estMonCourrier(lettre.row, operateur));
+  if (etrangere) {
+    const erreur = new Error("the door will not return a letter that is not in the operator's mail");
+    erreur.code = "clef_indisponible";
+    erreur.envoi_id = envoi.envoi_id;
+    erreur.table = envoi.table?.nom ?? null;
+    erreur.adresse = etrangere.to;
+    erreur.lettres_ecrites = envoi.lettres.filter((lettre) => estMonCourrier(lettre.row, operateur));
+    throw erreur;
+  }
+  return envoi;
+}
+
+// ── LES REFUS DU GUICHET (1.1.0) ────────────────────────────────────────────
+//
+// Le guichet LÈVE (`code`) pour ce qu'il refuse d'écrire : l'enclos, une table
+// inconnue, un expéditeur qui n'en est pas membre, un nom de table hors forme.
+// Un refus du produit n'est pas une panne de la porte : il se rend en JSON,
+// avec son code tel quel (`refus`), un motif anglais et le bon statut, et il
+// n'a rien écrit — le guichet refuse AVANT la première ligne (spec A §4).
+// Chaque code est un littéral ici, comme au serveur MCP : une doc qui les liste
+// se sonde dans ce fichier.
+// UN ENVOI DE TABLE QUI CASSE EN CHEMIN dit ce qui est parti, sous la forme du
+// guichet (`interruptionDEnvoi`, partagée avec l'outil MCP `send` et
+// `valxos-send`) : `interrompu`, `envoi_id`, `table`, `adresse` (le membre où
+// l'envoi a cassé), `lettres_ecrites`. Le statut est 500 — l'envoi n'a pas
+// abouti — mais jamais « panne, rien d'écrit » : `refus` garde le code
+// d'origine quand c'est un des nôtres (un enclos posé pendant l'envoi), sinon
+// `envoi-interrompu`, avec le code brut dans `cause` — un CODE, jamais un
+// message.
+// ⚠️ ET LE MOTIF EST UNE PHRASE FIXE, là où le MCP et la CLI rendent celui du
+// guichet. Ce motif-là recopie le message de la panne d'origine (SQLite, un
+// chemin, un détail interne) : la porte tient la doctrine de `servirLaPanne`
+// — le client n'a pas à lire la trace d'une base. L'erreur entière part sur
+// stderr, côté serveur (`servirPoster`).
+// `champs` (déjà borné) s'ajoute au corps : le nom de table d'un envoi refusé.
+// Ce que la porte ne connaît pas et qui n'a rien écrit (`null`) remonte à
+// `servirLaPanne`, comme avant.
+function refusConnu(erreur) {
+  switch (erreur?.code) {
+    case "hors-enclos":
+      return {
+        statut: 403,
+        corps: {
+          refus: "hors-enclos",
+          enclos: erreur.enclos ?? null,
+          destinataires_refuses: erreur.destinataires_refuses ?? [],
+          ...(erreur.autres ? { autres: erreur.autres } : {}),
+          motif: "the operator is enclosed: its letters only go to the members of its closed table (send hors_enclos: true to step out)"
+        }
+      };
+    case "enclos-conflit":
+      // S9 : deux enclos tiennent l'opérateur dans deux tables ; l'opérateur en lève un.
+      return {
+        statut: 403,
+        corps: {
+          refus: "enclos-conflit",
+          tables: erreur.tables ?? [],
+          enclos_poses: erreur.enclos_poses ?? [],
+          motif: "the operator is enclosed in more than one table: no letter goes out until one of these enclosures is lifted (send hors_enclos: true to step out)"
+        }
+      };
+    case "table-inconnue":
+      return { statut: 404, corps: { refus: "table-inconnue", motif: "no table of that name" } };
+    case "pas-membre":
+      return { statut: 403, corps: { refus: "pas-membre", motif: "the operator is not a member of this table" } };
+    case "nom-de-table-invalide":
+      return {
+        statut: 400,
+        corps: {
+          refus: "nom-de-table-invalide",
+          // La phrase du carnet (`validerNomDeTable`), qui dit la règle là où elle
+          // vit — jamais une troisième copie. Elle recopie le nom tapé, borné.
+          motif: String(erreur.message)
+        }
+      };
+    default:
+      return null;
+  }
+}
+
+export function refusDuGuichet(erreur, champs = {}) {
+  const connu = refusConnu(erreur);
+  const interruption = interruptionDEnvoi(erreur);
+  if (!interruption) return connu ? { statut: connu.statut, corps: { ...champs, ...connu.corps } } : null;
+  return {
+    statut: 500,
+    corps: {
+      ...champs,
+      ...(connu ? connu.corps : { refus: "envoi-interrompu" }),
+      ...interruption,
+      motif: "the send stopped partway: the letters in lettres_ecrites were written, the others were not",
+      ...(connu || !codeDeLaCause(erreur) ? {} : { cause: codeDeLaCause(erreur) })
+    }
+  };
+}
+
+// La réponse d'un envoi à une table : le vocabulaire de la porte pour l'adresse
+// (`destinataire`), la table du guichet, et un résultat par lettre sous la
+// forme PARTAGÉE avec l'outil MCP `send` et `valxos-send`
+// (`lettreDeTableRendue` : `to`, `msg_id`, `seq`, `wake`, l'avis, le réveil
+// décidé, et `rejeu`/`ecarte`/`clef_ecartee` quand le guichet les pose).
+// Jamais un `msg_id` de tête : un envoi n'a pas UNE clef, il en a une par membre.
+async function servirLeDepotAUneTable(contexte, res, entree, nomDemande, clefDemandee) {
+  const envoi = await deposerAUneTablePourLOperateur(
+    contexte.db,
+    contexte.operateur,
+    { ...entree, table: nomDemande },
+    clefDemandee
+  );
+  repondreJson(res, 200, {
+    destinataire: `table:${envoi.table.nom}`,
+    table: envoi.table,
+    envoi_id: envoi.envoi_id,
+    count: envoi.count,
+    results: envoi.lettres.map((lettre) => lettreDeTableRendue(lettre, envoi.envoi_id))
+  });
+}
+
 async function servirPoster(contexte, req, res) {
   const demande = await corpsJson(req);
   if (demande.refus) {
@@ -925,29 +1104,65 @@ async function servirPoster(contexte, req, res) {
 
   // `msg_id` est la clef d'idempotence du front : rejouée, elle rend LA lettre,
   // jamais une seconde (la loi vit au guichet, remède R2). Elle passe par
-  // `deposerPourLOperateur`, qui refuse de déposer sous la clef d'un autre.
+  // `deposerPourLOperateur`, qui refuse de déposer sous la clef d'un autre — et,
+  // pour une table, par le guichet, qui fait de même sur chaque clef dérivée.
   const clefDemandee = String(demande.valeur.msg_id ?? "").trim();
 
-  const { row, wake, attente, rejeu, clefEcartee } = await deposerPourLOperateur(
-    contexte.db,
-    contexte.operateur,
-    {
-      // ⚠️ LA PORTE SIGNE L'OPÉRATEUR FIXÉ AU DÉMARRAGE, TOUJOURS. `de` n'est
-      // pas un paramètre : un client qui en glisse un dans le corps est ignoré,
-      // jamais honoré. Écrire « de la part de » quelqu'un est exactement ce que
-      // cette porte ne fait jamais.
-      sender: contexte.operateur,
-      recipient: a,
-      subject: demande.valeur.objet ?? null,
-      body: corps,
-      thread_id: demande.valeur.thread_id ?? null,
-      priority: demande.valeur.priorite,
-      msg_type: demande.valeur.type,
-      // L'opérateur est un humain : aucun modèle à estampiller. Inconnu se dit nul.
-      sender_model: null
-    },
-    clefDemandee
-  );
+  // L'ENVELOPPE COMMUNE AUX DEUX DÉPÔTS.
+  // ⚠️ LA PORTE SIGNE L'OPÉRATEUR FIXÉ AU DÉMARRAGE, TOUJOURS. `de` n'est pas
+  // un paramètre : un client qui en glisse un dans le corps est ignoré, jamais
+  // honoré. Écrire « de la part de » quelqu'un est exactement ce que cette
+  // porte ne fait jamais.
+  const entree = {
+    sender: contexte.operateur,
+    // Un humain sans chaise : aucune chaise à nommer (1.1.0, l'affichage du nom
+    // de chaise), aucun modèle à estampiller. Inconnu se dit nul.
+    sender_chaise: null,
+    subject: demande.valeur.objet ?? null,
+    body: corps,
+    thread_id: demande.valeur.thread_id ?? null,
+    priority: demande.valeur.priorite,
+    msg_type: demande.valeur.type,
+    sender_model: null,
+    // L'ENCLOS (1.1.0) : `hors_enclos: true` laisse sortir une lettre ou un
+    // envoi, comme `--hors-enclos` au CLI et `hors_enclos` à l'outil MCP. Un
+    // booléen STRICT — la chaîne « true » ou un 1 n'ouvrent rien : sortir de
+    // l'enclos est un geste, pas une coercition.
+    hors_enclos: demande.valeur.hors_enclos === true
+  };
+
+  // UNE TABLE : le même guichet que `send` (MCP) et `valxos-send`, une lettre
+  // par membre. Toute autre adresse est une lettre, comme avant.
+  const nomDeTable = nomDeTableDe(a);
+  if (nomDeTable !== null) {
+    try {
+      await servirLeDepotAUneTable(contexte, res, entree, nomDeTable, clefDemandee);
+    } catch (erreur) {
+      // Un refus du guichet se rend ; tout le reste reste une panne. Un nom
+      // valide s'écrit normalisé (le carnet : minuscules), même quand le refus
+      // ne le porte pas (`hors-enclos`) ; un nom hors forme se rend tel que tapé.
+      const echo = erreur?.table ?? (erreur?.code === "nom-de-table-invalide" ? nomDeTable : nomDeTable.toLowerCase());
+      const refus = refusDuGuichet(erreur, { table: borne(echo) });
+      if (!refus) throw erreur;
+      // Un envoi interrompu est une panne À MOITIÉ : le client lit ce qui est
+      // parti, le serveur garde la trace entière — même ligne que `servirLaPanne`.
+      if (refus.statut >= 500) process.stderr.write(`web door: ${erreur?.stack || erreur}\n`);
+      repondreJson(res, refus.statut, refus.corps);
+    }
+    return;
+  }
+
+  let depot;
+  try {
+    depot = await deposerPourLOperateur(contexte.db, contexte.operateur, { ...entree, recipient: a }, clefDemandee);
+  } catch (erreur) {
+    // L'enclos refuse une lettre comme un envoi : avant d'écrire, en JSON.
+    const refus = refusDuGuichet(erreur);
+    if (!refus) throw erreur;
+    repondreJson(res, refus.statut, refus.corps);
+    return;
+  }
+  const { row, wake, attente, rejeu, clefEcartee } = depot;
 
   repondreJson(res, 200, {
     msg_id: row.msg_id,
@@ -1063,8 +1278,18 @@ function ecrireEvenement(res, type, donnees) {
 // disait « il y a un cri quelque part » sans jamais dire lequel.
 //
 // La signature porte donc les deux, et le mot « changement » redevient vrai.
+//
+// ET L'EN-TÊTE DE TABLE (1.1.0), troisième morceau : la position bouge pendant
+// la séance (le porteur avance le film), le mode peut changer, et aucune
+// colonne de la lettre ne bouge avec eux. Sans eux dans la signature, une page
+// ouverte garderait « 1:25:00 » pendant que la table dit 1:40:00. La position
+// entre en JSON (une chaîne citée ne peut pas imiter le séparateur) ;
+// l'échappement `\0` (jamais un octet nul littéral : test/surfaces.test.js)
+// sépare les morceaux. Un changement émet un `etat` par lettre de la table au
+// fil — rare, et c'est le point.
 function signatureDeLaLettre(row, cri) {
-  return `${etatDeLaLettre(row)}\0${cri ? JSON.stringify(cri) : ""}`;
+  const table = row.affichage?.table;
+  return `${etatDeLaLettre(row)}\0${cri ? JSON.stringify(cri) : ""}\0${table ? JSON.stringify([table.mode, table.position]) : ""}`;
 }
 
 // ── LE BATTEMENT ET LA MOISSON — CE QUI REND VRAIMENT UNE PLACE ─────────────

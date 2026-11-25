@@ -96,7 +96,9 @@ revient.
    dans la tentative le **quadruplet** visé : maison, session, heure de
    démarrage, chemin de la boîte. Une lignée **ambiguë** ne se tranche pas : la
    lettre attend (« elle ne se joue pas aux dés »). Une **maison inconnue** n'est
-   pas une **boîte endormie** — les deux se journalisent séparément.
+   pas une **boîte endormie** — les deux se journalisent séparément. Une
+   session qui a une fiche de chaise Codex ne se cherche pas de boîte : elle se
+   **sonne** (voir « La lettre calme et la porte Codex »).
 3. **Remettre au guichet.** Connexion, jeton, enveloppe NDJSON, délai de
    fermeture, fermeture. **Aucune transaction SQLite n'est ouverte pendant ce
    temps.** L'enveloppe porte toujours `session_id` : c'est le verrou
@@ -205,7 +207,8 @@ aucune garde.
 > silencieux sur « alors je prends tout » — ce serait le pire défaut possible de
 > ce mode. Le filtre **restreint** la requête de réservation ; il ne l'élargit
 > jamais. Et il le **dit** : motif `lettre-introuvable` (aucune lettre de ce nom)
-> ou `lettre-non-prise` avec l'état dérivé (ACCUSÉE, RÉSERVÉE, DIFFÉRÉE) dans le
+> ou `lettre-non-prise` avec l'état dérivé (ACCUSÉE, RÉSERVÉE, DIFFÉRÉE, ou PRÊTE
+> pour une lettre calme, que l'événement marque alors `calme: true`) dans le
 > bilan, événement `facteur_lettre_non_prise` au journal, et **code de sortie 4**
 > — un identifiant mal recopié ne doit pas ressembler à une tournée tranquille.
 
@@ -226,6 +229,134 @@ Le curseur ne recule pas : une lettre bloquée passe **derrière** lui au lieu d
 remplir toutes les tournées. Avec `B` lettres bloquées et `N` lettres par
 tournée, une lettre saine est atteinte en **ceil((B+1)/N)** tournées. Quand la
 fenêtre est épuisée, un nouveau balayage s'ouvre sur le courrier du moment.
+
+---
+
+## La lettre calme et la porte Codex (1.1.0)
+
+**La lettre calme ne se porte pas.** Une lettre de table que le guichet a
+décidée calme (`sans_reveil = 1` : priorité `low`, règle `prochain-tour` du
+membre ou de la table, réaction dans une table `direct`) n'est jamais candidate
+à une tournée : ni prise, ni tentée, ni marquée `carried_at`, et elle ne passe
+pas derrière le curseur — elle n'y entre simplement pas. Elle n'est pas perdue
+(A9) : le canal de repli la sert au prochain démarrage de session, au prochain
+appel d'outil ou au prochain `inbox`, et elle ne retient jamais un arrêt. Une
+lettre ordinaire naît à `sans_reveil = 0` et se porte comme en 1.0.0.
+
+**La porte Codex.** Une chaise Codex n'a pas de boîte native : son hook
+`SessionStart` écrit une fiche (`<bureau>/codex/<lignée>.json`) qui donne son
+fil et son `CODEX_HOME`, et inscrit le fil comme session de la carte de la
+lignée. Quand une lettre mène à une session qui a une fiche, la tournée ne
+cherche pas de boîte : elle **sonne**, par `codex queue --thread <fil>
+--message <enveloppe>` sous le `CODEX_HOME` de la fiche, borné à 5 s par essai,
+avec une relance (au couperet, le groupe de processus de l'enfant est tué ; un
+petit-fils qui a quitté ce groupe (`setsid`) lui survit). L'enveloppe est une ligne
+anglaise qui dit qu'une lettre attend — expéditeur, table, objet coupé à 60
+caractères, priorité, un compte — et **jamais un corps** : elle arrive au
+modèle comme une parole de l'utilisateur. Le corps arrive par les hooks et
+`inbox`. Le journal ne porte jamais l'enveloppe : elle cite un objet.
+
+Quatre règles :
+
+- **Une sonnerie par chaise et par tournée.** Les lettres qui attendent la
+  même chaise partent dans la même enveloppe ; les suivantes de la tournée
+  reprennent le verdict de la première. Un verdict réussi ne vaut que pour les
+  lettres que l'enveloppe nommait : une lettre arrivée pendant la sonnerie
+  attend la tournée suivante (`sonnette-codex-differee`).
+- **Une sonnerie par lettre.** Une lettre déjà remise au guichet
+  (`carried_at`) ne resonne jamais (`sonnette-codex-deja-sonnee`, échéance
+  finie) : ce sont les hooks qui la re-servent.
+- **Une ouverture de l'app par lettre, au plus.** Quand aucune session ne
+  tient le fil (`No active session`), ou quand la file a pris l'enveloppe alors
+  que l'app de bureau est fermée (`lsappinfo find bundleid=com.openai.codex`),
+  la porte ouvre l'app sur le fil (`open codex://threads/<fil>`, macOS) —
+  jamais sur `no rollout found`, jamais pour une chaise `cli` ou `exec`, jamais
+  avec `VALXOS_CODEX_OUVRIR_APP=0`. Le droit d'ouvrir se juge par lettre
+  neuve : une enveloppe retente l'ouverture tant qu'une de ses lettres n'en a
+  jamais eu, et une lettre plus ancienne qui a déjà eu la sienne peut être
+  couverte de nouveau par l'ouverture d'une neuve qui voyage avec elle.
+  L'ouverture tentée se note sur les lettres qui y avaient droit, une fois
+  chacune (`facteur_codex_app_ouverte`), et le journal la dit une fois par
+  enveloppe, avec ces lettres et le nombre de lettres couvertes.
+- **Un échec est une raison, pas un état.** `sonnette-codex-impossible` se
+  reporte comme un échec passager : la lettre n'est pas marquée remise, elle
+  attend la tournée suivante, et le canal de repli la sert. Le détail va au
+  journal (`facteur_echec`) : `codex-introuvable` (aucun `codex` sur le PATH
+  du Facteur), `codex-injoignable`, `codex-delai` (plus de 5 s), `codex-refus`,
+  `codex-fil-sans-session` (la file refuse deux fois), `fiche-incomplete` (une
+  fiche sans fil ou sans `CODEX_HOME`), `run-inaccessible` (le dossier
+  `<bureau>/run/` d'où `codex queue` part ne peut pas être assuré : aucun
+  `codex` n'est lancé, jamais depuis le dossier du Facteur), ou `porte-codex-absente` (une tournée à
+  qui personne n'a
+  tendu la porte : le démon et `--une-tournee` la tendent toujours). Une
+  ouverture de l'app ratée se note `open-impossible` ou `open-delai`.
+
+Une sonnerie réussie se compte au bilan sous `sonnee-codex`, ou
+`sonnee-codex-app-ouverte` quand l'app s'est ouverte, et la lettre est marquée
+`carried_at`. `envoi_status` (MCP) rend la dernière tentative de chaque lettre
+d'un envoi de table (`tournee`), raison comprise. Le Facteur ne lance jamais
+`codex exec resume` : ce serait un tour payant sans personne au clavier, et un
+second écrivain sur un fil ouvert.
+
+> Limites connues : après Échap dans le TUI de Codex, la file se fige jusqu'au
+> prochain prompt tapé par un humain, et le Facteur ne peut pas le voir. Un
+> `codex queue` qui a mis l'enveloppe en file mais ne rend pas la main en 5 s
+> compte pour un échec (`codex-delai`) : la tournée suivante peut sonner une
+> seconde fois — un doublon, assumé (A8). Les comptes de l'enveloppe sont
+> indicatifs : la tournée peut en porter moins (plafond par boîte, lettres par
+> tournée). Une fiche par lignée : deux sessions Codex sous un même nom sonnent
+> celle dont le `SessionStart` a tourné en dernier.
+
+---
+
+## Le retour à l'expéditeur (1.1.0)
+
+**Une lettre vers un nom que personne n'a jamais porté revient à son
+expéditeur.** « Jamais porté » : aucune fiche n'a eu ce nom (son `id` ou sa
+`lineage`, quel que soit son statut), aucune réexpédition ni alias n'en part ni
+n'y mène, et le carnet du relais ne l'a jamais vu. La racine de l'adresse compte
+(`alice#…` et `alice@…` se jugent sur `alice`), et la comparaison est exacte,
+comme la résolution. À chaque tournée, le Facteur lit le bureau — pas sa propre
+sélection : une lettre ajournée, calme, ou écrite directement dans la base par un
+autre outil (sans le serveur MCP) en profite aussi. Quand une telle lettre
+attend depuis le délai de retour (`VALXOS_RETOUR_APRES_S`, 900 s par défaut ;
+`0` éteint les retours),
+sans avoir été relevée par personne (`delivered_at`, `injected_at`, `carried_at`
+et `acked_at` nuls), le Facteur écrit une lettre à son expéditeur :
+
+- expéditeur `facteur`, `msg_type: "status"`, priorité `low`, dans le fil de la
+  lettre d'origine, en réponse à elle (`reponse_a`) ;
+- **calme** (`sans_reveil = 1`) : elle n'est jamais portée, l'expéditeur la lit
+  au tour suivant (démarrage de session, appel d'outil, `inbox`) ;
+- en anglais : l'objet d'origine, la raison (`destinataire-inconnu`), et les
+  lignées vivantes qui approchent du nom — celles qui commencent par
+  `<nom>-`, puis celles à deux fautes de frappe au plus (distance d'édition,
+  casse ignorée), cinq au plus ; puis l'âge réel de la lettre (lu dans
+  `created_at` ; « more than » le délai quand il ne se lit pas), et une
+  dernière ligne qui dit qu'aucune réponse n'est attendue.
+
+**Rien n'est effacé, rien ne se ferme.** La lettre d'origine reste au bureau,
+non accusée : si quelqu'un prend ce nom, elle lui arrive. Elle est seulement
+marquée : un événement `retournee` dans `delivery_events` (le `msg_id` du retour,
+l'adresse de retour, les suggestions — jamais l'objet). La marque est aussi la
+garde : un retour par lettre, relu sous le verrou d'écriture, donc un seul même
+quand deux porteurs se croisent. Le journal dit `facteur_retour_a_l_expediteur`,
+et le bilan de la tournée compte le motif `retour-a-l-expediteur`.
+
+**Ce qui ne revient jamais** : une lettre vers un nom déjà porté (une fiche
+morte ou retirée, une réexpédition : son régime d'avant, inchangé), une lettre
+que quelqu'un a relevée, une lettre de `facteur` lui-même, une lettre adressée
+à `facteur` (une réponse à un retour : elle reste au bureau ; le retour finit
+par « Automatic notice; no need to reply. »). Le mode
+`--seulement-la-lettre` ne retourne rien. Le démon balaie au plus une fois par
+minute (pas à chaque tournée) : un retour part au plus une minute après son
+délai. Un balayage retourne 20 lettres au plus ; les suivantes partent au
+balayage d'après. Une tournée isolée (`--une-tournee`) balaie toujours.
+
+Au moment du `send`, l'avis le dit déjà : `attente.motif` reste
+`destinataire-inconnu` (c'est le contrat), et `attente.suggestions` porte les
+mêmes noms (« No one has this name; did you mean … ? »). Un nom déjà porté garde
+l'avis d'avant, sans suggestions.
 
 ---
 
@@ -253,7 +384,9 @@ réglage `VALXOS_*` prend priorité.
 | délai de fermeture | 150 ms | `VALXOS_FACTEUR_DELAI_FERMETURE_MS` (`CC2CC_FACTEUR_DELAI_FERMETURE_MS`) |
 | sommeil entre deux tournées | 1 000 ms | `VALXOS_FACTEUR_TOURNEE_CHAQUE_MS` (`CC2CC_FACTEUR_TOURNEE_CHAQUE_MS`) |
 | battement de vie du démon | 60 000 ms | `VALXOS_FACTEUR_BATTEMENT_CHAQUE_MS` (`CC2CC_FACTEUR_BATTEMENT_CHAQUE_MS`) |
-| inventaire des maisons | `~/.claude`, plus `$CLAUDE_CONFIG_DIR` s'il désigne une autre maison | `VALXOS_MAISONS` (`CC2CC_MAISONS`, séparées par `:`), qui remplace le défaut |
+| inventaire des maisons | `~/.claude`, plus `$CLAUDE_CONFIG_DIR` s'il désigne une autre maison | `VALXOS_MAISONS` (`CC2CC_MAISONS`, séparées par `:`), qui remplace le défaut ; une entrée qui finit par `/*` est une rue : chaque dossier dessous est une maison, relue à chaque tournée. Sous launchd, la valeur épinglée dans le plist |
+| ouvrir l'app de bureau Codex sur un fil qui attend (une fois par lettre) | oui ; `0` l'éteint | `VALXOS_CODEX_OUVRIR_APP` (`CC2CC_CODEX_OUVRIR_APP`) |
+| délai avant le retour à l'expéditeur d'une lettre vers un nom jamais porté | 900 s ; `0` éteint les retours | `VALXOS_RETOUR_APRES_S` (`CC2CC_RETOUR_APRES_S`), en secondes |
 
 **Des règles sont vérifiées au démarrage et refusées si elles sont fausses :**
 
@@ -266,8 +399,10 @@ réglage `VALXOS_*` prend priorité.
   toujours : un silence sans retour, donc A9 mort.
 - `battementChaqueMs` fini et strictement positif. Un battement nul serait le
   journal bavard qu'on vient d'éteindre ; un battement infini, un démon muet.
+- `retourApresMs` fini, et `0` ou plus. `0` éteint le retour à l'expéditeur
+  (aucun balayage) ; une valeur négative ou infinie est refusée.
 
-Le schéma du bureau porte le numéro **6** (`user_version`) : les tables du
+Le schéma du bureau porte le numéro **8** (`user_version`) : les tables du
 Facteur sont une addition de schéma, et un bureau qui les porte ne doit pas être
 indiscernable d'un bureau qui ne les a jamais vues.
 
@@ -397,7 +532,7 @@ delivered_at IS NULL`. **Le Facteur ne l'utilise pas** et ne doit jamais
 l'utiliser : `carried_at` n'est pas un état terminal, et sélectionner sur lui
 rendrait une lettre remise mais jamais accusée **invisible** — A9 mort. Le
 commentaire est CORRIGÉ (remède de la revue adverse #2, S7) : aucun appelant en
-production ne l'exerce aujourd'hui — ni le Facteur, ni le canal de repli, qui
-est vraiment servi par `getPendingForContext` juste au-dessus dans le même
-fichier. La fonction elle-même survit par Camp B (rien ne s'efface), inerte,
-jamais branchée sur un chemin de livraison.
+production ne l'exerçait — ni le Facteur, ni le canal de repli, qui est
+vraiment servi par `getPendingForContext` dans le même fichier. En 1.1.0 la
+fonction n'est plus exportée : un sélecteur dangereux sans appelant ne reste pas
+à portée de main, et l'historique git garde son code.

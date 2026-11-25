@@ -2,11 +2,16 @@
 // SPDX-FileCopyrightText: 2026 VALXOS contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licence complète : voir LICENSE à la racine du dépôt.
-import { getPendingForContext, journaliserLesAliasLus, markDelivered, marquerCopiesVues } from "../lib/database.js";
-import { formatAdditionalContext, formatCopies } from "../lib/format.js";
+import { taireLaLigneDeCompatibilite } from "../lib/config.js";
+import { servirSousLeBudget } from "../lib/budget-courrier.js";
+import { getPendingForContext, journaliserLesAliasLus } from "../lib/database.js";
 import { copiesPourMoi } from "../lib/identity.js";
 import { cleDuVerrouDArret, resetStopGuard } from "../lib/stop-guard.js";
 import { hookContext, readHookInput, writeStdoutJson } from "./hook-common.js";
+
+// La ligne « compatibility - using historical runtime » se dit au SessionStart, une fois par
+// session (1.1.0, Tâche 8) : ici, on se tait — AVANT d'ouvrir le bureau (`hookContext`).
+taireLaLigneDeCompatibilite();
 
 const input = await readHookInput();
 const { db, selfId, adresses, recoit } = hookContext(input);
@@ -15,31 +20,55 @@ if (!recoit) {
   writeStdoutJson({});
   process.exit(0);
 }
-const rows = getPendingForContext(db, adresses, { limit: 20 });
-journaliserLesAliasLus(db, rows, selfId);
+const enAttente = getPendingForContext(db, adresses, { limit: 20 });
+journaliserLesAliasLus(db, enAttente, selfId);
 // La copie cc (Task 7) : la lettre de la lignée quand elle est à une AUTRE
 // chaise (ou tenue, sans chaise désignée). Vue une fois, jamais livrée — ni
 // `markDelivered` ni `resetStopGuard` ne la touchent, et le filet de Stop ne
-// la cherche pas : une copie ne bloque jamais un Stop.
+// la cherche pas : une copie ne bloque jamais un Stop. Une lettre de table
+// fermée (`sans_copie`) n'arrive jamais ici (1.1.0, `getCopiesPourChaise`).
 const cc = copiesPourMoi(db, selfId, input, { limit: 20 });
-const contexte = [
-  formatAdditionalContext(rows),
-  formatCopies(cc.rows, cc.destinataire, cc)
-].filter(Boolean).join("\n\n");
 
-if (!contexte) {
+if (enAttente.length === 0 && cc.rows.length === 0) {
   writeStdoutJson({});
   process.exit(0);
 }
 
-if (rows.length > 0) {
-  markDelivered(db, rows, selfId, "post_tool_use_delivered");
+// LE BUDGET (1.1.0, Tâche 7) : Claude Code range dans un fichier tout ce qu'un crochet rend
+// au-delà d'environ 10 000 caractères, et le modèle n'en lit qu'un aperçu. `servirSousLeBudget`
+// choisit ce qui tient (9 000 caractères au plus, copies comprises), puis marque et met en forme
+// d'un seul tenant : une lettre n'est tamponnée `post_tool_use_delivered` que si son corps entier est
+// dans la sortie, une copie n'est vue (`cc_vu`) que si elle est montrée. Ce qui ne tient pas attend
+// sans marque ; une lettre trop longue pour jamais tenir seule est annoncée (`announced`), au plus
+// trois fois, et `inbox` la lit entière.
+// LA MARQUE AVANT LA FORME (1.1.0, Tâche 8), gardée pour ce qui se montre : `markDelivered` compte
+// le re-service, et `enrichirPourAffichage` lit ce compte en base pour nommer le rappel
+// (`Reminder: n`) — il compte CE service-ci. La marque est posée avant l'écriture du contexte, comme
+// avant : un hook mort entre les deux laisse la fenêtre de re-service rattraper la lettre (A9).
+// `enrichirPourAffichage` (1.1.0) : la table, le nom de chaise et le rappel, pour l'en-tête et rien
+// d'autre ; le lecteur est cette boîte (`adresses`) — la position d'une table fermée ne se montre
+// qu'à un membre.
+const servi = servirSousLeBudget(db, {
+  lettres: enAttente,
+  cc,
+  adresses,
+  selfId,
+  etiquette: "post_tool_use_delivered",
+  via: "post_tool_use",
+  limit: 20
+});
+// Le verrou d'arrêt ne repart que si une lettre a vraiment été livrée : une annonce n'est pas une
+// livraison, et le filet de Stop garde ses trois blocages pour une lettre qui attend.
+if (servi.livrees.length > 0) {
   resetStopGuard(cleDuVerrouDArret(selfId, input.session_id || input.sessionId)); // F4 : le verrou de CETTE chaise
 }
-if (cc.rows.length > 0) marquerCopiesVues(db, cc.rows, cc.chaiseId);
+if (!servi.texte) {
+  writeStdoutJson({});
+  process.exit(0);
+}
 writeStdoutJson({
   hookSpecificOutput: {
     hookEventName: "PostToolUse",
-    additionalContext: contexte
+    additionalContext: servi.texte
   }
 });

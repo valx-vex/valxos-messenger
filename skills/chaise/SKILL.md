@@ -31,7 +31,9 @@ that must never be collapsed:
 3. **Designation is a HUMAN gesture.** When a lineage has several living
    chairs, mail waits for a human to designate — a session never designates
    itself, and "latest wins" is forbidden. While the lineage is ambiguous,
-   write to a precise chair with the `lignée#session` address form.
+   write to a precise chair with the `lignée#session` address form — or its
+   short form, the lineage and the first eight or more hexadecimal characters
+   of the session id, when exactly one chair in service matches.
 4. **A name never dies.** Renaming a lineage means depositing a forwarding
    record (`anciens-noms`): the old name resolves exactly like the lineage it
    points to — designation and ambiguity included. A rename without a
@@ -43,7 +45,7 @@ that must never be collapsed:
 
 ## The gestures
 
-If a tool below is not loaded yet (recent Claude Code defers MCP tools behind tool search), load it first; `inbox`, `send` and `ack` are always loaded.
+If a tool below is not loaded yet (recent Claude Code defers MCP tools behind tool search), load it first; `inbox`, `send`, `ack` and `reply` are always loaded.
 
 Register (MCP): `register` — or let the harness hooks announce you.
 
@@ -76,6 +78,10 @@ Harvest (the explicit gesture that marks dead chairs dead):
 ```bash
 valxos-chaise moissonner                    # or valxos-doctor --reap
 ```
+
+A Codex chair (1.1.0) is harvested by `valxos-doctor --reap` only, once its
+process is gone and no hook has seen it for 24 hours; `valxos-chaise
+moissonner` leaves it alone.
 
 ## The lifecycle
 

@@ -119,12 +119,10 @@ test("une diffusion vers N lignées ne fait QU'UN scan des maisons — compté s
     command: "node",
     args: [path.join(repo, "src/mcp-server/server.js")],
     env: {
-      ...envPropre(),
-      CC2CC_V2_HOME: root,
       // UNE SEULE maison à l'inventaire : la nôtre. Sans ça la tournée irait
-      // voir les vraies maisons de la machine.
-      CC2CC_MAISONS: maison,
-      CC2CC_SELF: "posteur-c1"
+      // voir les vraies maisons de la machine. (Posée dans `envPropre`, qui
+      // n'ajoute alors pas sa maison vide.)
+      ...envPropre({ CC2CC_V2_HOME: root, CC2CC_MAISONS: maison, CC2CC_SELF: "posteur-c1" })
     }
   });
   await client.connect(transport);

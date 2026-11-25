@@ -134,11 +134,15 @@ test("sans CLAUDE_CONFIG_DIR, l'install réelle pose le lien sous ~/.claude et l
 // dans un module ES — un environnement sans HOME faisait mourir l'installeur
 // d'une ReferenceError au lieu de se rabattre sur le domicile du compte.
 // Dry-run seulement : sans HOME, le repli est le domicile RÉEL, et un test
-// n'y écrit rien.
+// n'y écrit rien (la maison Claude est posée dans le faux home, pour qu'il ne la lise pas non plus).
 test("HOME absent de l'environnement : l'installeur démarre quand même", (t) => {
   const home = fauxHome(t);
   const env = environnement(home);
   delete env.HOME;
+  // The account-home fallback is still exercised (HOME is absent), but the
+  // Claude house is pointed at the throwaway home so the installer never
+  // looks at the real one.
+  env.CLAUDE_CONFIG_DIR = path.join(home, ".claude");
   const sortie = spawnSync(process.execPath, [path.join(repo, "scripts", "install.js"), "--dry-run"], {
     encoding: "utf8",
     cwd: repo,

@@ -16,6 +16,10 @@
 //
 // La règle est donc unique et vit ici : ce qu'un test pose explicitement
 // gouverne ; ce que le lanceur avait exporté pour LUI ne descend jamais.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 export const CLEFS_DU_LANCEUR = [
   "VALXOS_MESSENGER_HOME",
   "CC2CC_V2_HOME",
@@ -29,7 +33,11 @@ export const CLEFS_DU_LANCEUR = [
   "VALXOS_SELF",
   "CC2CC_SELF",
   "VALXOS_SESSION_NAME",
-  "CC2CC_SESSION_NAME"
+  "CC2CC_SESSION_NAME",
+  // The houses the launcher declared never reach a child either (see
+  // `envPropre`: a child gets an EMPTY house, never the launcher's).
+  "CC2CC_MAISONS",
+  "VALXOS_MAISONS"
 ];
 
 // AUCUN ENFANT NE LAISSE DE BYTECODE DANS L'ARBRE (C1, FIX-C, 18/10). Le moniteur
@@ -37,10 +45,43 @@ export const CLEFS_DU_LANCEUR = [
 // variable, chaque chargement écrit `src/monitor/__pycache__/*.pyc`, qui porte
 // le chemin absolu de la source (donc le nom du compte). `files` retire ces
 // fichiers du paquet ; ici on évite de les écrire. Ce qu'un test pose gouverne.
+//
+// NO CHILD LOOKS AT A REAL HOUSE. A child that inherited the real `HOME` scanned
+// `~/.claude/sessions` (the registry of a real person's Claude Code sessions)
+// and liveness-probed every session it found. So a child gets, by default:
+//   - a throwaway `HOME` (one per test process, removed when it exits);
+//   - `CC2CC_MAISONS` / `VALXOS_MAISONS` set to the PATH of an empty directory
+//     (never "": an empty string falls back to the default `~/.claude`);
+//   - no `CLAUDE_CONFIG_DIR` (see CLEFS_DU_LANCEUR).
+// What a test sets explicitly governs: a test that needs a house builds it in
+// its own throwaway directory and passes `HOME` and/or the houses variables.
+// Only one of the two houses variables is defaulted when the test sets the
+// other, because the VALXOS_* family outvotes CC2CC_*.
+let decorIsole = null;
+function decor() {
+  if (decorIsole) return decorIsole;
+  const racine = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "valxos-enfant-")));
+  const home = path.join(racine, "home");
+  const maisonsVides = path.join(racine, "maisons-vides");
+  fs.mkdirSync(home);
+  fs.mkdirSync(maisonsVides);
+  process.on("exit", () => {
+    try { fs.rmSync(racine, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+  decorIsole = { home, maisonsVides };
+  return decorIsole;
+}
+
 export function envPropre(ajouts = {}) {
   const env = { ...process.env };
   for (const clef of CLEFS_DU_LANCEUR) delete env[clef];
-  return { ...env, PYTHONDONTWRITEBYTECODE: "1", ...ajouts };
+  const { home, maisonsVides } = decor();
+  const defauts = { HOME: home };
+  if (!("CC2CC_MAISONS" in ajouts) && !("VALXOS_MAISONS" in ajouts)) {
+    defauts.CC2CC_MAISONS = maisonsVides;
+    defauts.VALXOS_MAISONS = maisonsVides;
+  }
+  return { ...env, ...defauts, PYTHONDONTWRITEBYTECODE: "1", ...ajouts };
 }
 
 // LE BUREAU EN-PROCESSUS. Un test qui écrivait `process.env.CC2CC_V2_HOME =

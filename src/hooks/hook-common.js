@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licence complète : voir LICENSE à la racine du dépôt.
 import { getDatabase } from "../lib/database.js";
-import { codeDeSortieSurBureauRelatif, normalizeAgentId, valeurDeLEnvironnement } from "../lib/config.js";
+import { codeDeSortieSurBureauRelatif, identiteSansLignee, normalizeAgentId, valeurDeLEnvironnement } from "../lib/config.js";
 import {
   adressesDuRepli,
   chaiseReceptrice,
+  estUnAppelServi,
   journaliserRefusUneFois,
   resolveSelfId,
   touchSelf
@@ -42,9 +43,32 @@ function nomDeLEnvironnement() {
 // relève le courrier. Un refus rend `adresses = []` et `recoit: false` ; les
 // hooks sortent alors `{}` sans rien lire ni rien marquer — muets pour le
 // sous-agent ou le jumeau, dits une fois au journal du bureau.
+// m5 (re-revue du round FINAL) : l'identité FOURNIE que ces hooks prennent (la
+// règle de `resolveSelfId` : CC2CC_SELF, sinon CC2CC_SESSION_NAME, chacun sous
+// sa clef VALXOS_*) a-t-elle une lignée vide (`#foo`) ? Le serveur MCP et la CLI
+// la refusent (`identite-invalide`) ; les hooks la normalisaient en `_foo` et
+// livraient le courrier de `_foo`. Ils ne livrent plus rien : `{}`, comme sans identité.
+function identiteFournieSansLignee() {
+  for (const clef of ["CC2CC_SELF", "CC2CC_SESSION_NAME"]) {
+    const brut = valeurDeLEnvironnement(process.env, clef);
+    if (normalizeAgentId(brut)) return identiteSansLignee(brut);
+  }
+  return false;
+}
+
 export function hookContext(input) {
   const pid = process.ppid;
   const sessionId = input.session_id || input.sessionId || null;
+  // m5 : rien ne s'ouvre, rien ne se lit, rien ne se journalise.
+  if (identiteFournieSansLignee()) {
+    return { db: null, selfId: null, adresses: [], recoit: false, raison: "identite-invalide", input };
+  }
+  // Un appel SERVI pour une autre session (Claude Code 2.1.325 l'exécute dans le
+  // processus hôte, `session_id: "served:<appelant>"`) n'est pas une chaise : il
+  // ne relève rien, ne marque rien, n'inscrit aucune chaise `lignée#served:…`.
+  if (estUnAppelServi(sessionId)) {
+    return { db: null, selfId: null, adresses: [], recoit: false, raison: "appel-servi", input };
+  }
   // Un sous-agent est refusé AVANT d'ouvrir la base : aucun regard, même sur
   // le registre.
   if (input.agent_id) {

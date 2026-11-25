@@ -68,6 +68,67 @@ test("③ l'ancien bureau seul reste utilisé et le repli se dit une seule fois 
   assert.match(annonces[0], /\.valxos-messenger/);
 });
 
+// ③ (1.1.0, Tâche 8) LA LIGNE DE COMPATIBILITÉ, UNE FOIS PAR SESSION. « Une fois par processus »
+// suffisait au Facteur, au serveur MCP et à la porte web, qui vivent longtemps ; un hook est un
+// processus NEUF à chaque appel d'outil et à chaque Stop — la même ligne, des centaines de fois
+// par session, et devant le JSON d'un blocage du Stop. SessionStart la dit ; PostToolUse et Stop
+// se taisent. Le HOME est jetable (mkdtemp) et l'ancien bureau qu'on y pose est le « bureau
+// vivant » de ce test : la garde du bureau est levée pour ces enfants par `environnement`
+// (envPropre), comme pour toutes les sondes de ce fichier — elle refuserait sinon ce bureau-là,
+// qui est précisément celui qu'on veut voir choisi.
+function sonderHook(home, hook, input) {
+  return spawnSync(process.execPath, [path.join(repo, "src/hooks", hook)], {
+    encoding: "utf8",
+    input: JSON.stringify(input),
+    env: environnement(home, { CC2CC_SELF: "hook-agent" })
+  });
+}
+
+test("③ sous l'ancien bureau, SessionStart dit la ligne de compatibilité une fois ; PostToolUse et Stop se taisent", (t) => {
+  const home = fauxHome(t);
+  fs.mkdirSync(path.join(home, ".cc2cc-v2"));
+
+  const debut = sonderHook(home, "startup_sync.js", { hook_event_name: "SessionStart" });
+  assert.equal(debut.status, 0, debut.stderr);
+  const annonces = debut.stderr.trim().split("\n").filter(Boolean);
+  assert.equal(annonces.length, 1, `SessionStart parle une fois, reçu : ${debut.stderr}`);
+  assert.match(annonces[0], /^VALXOS Messenger: compatibility - using historical runtime /);
+
+  for (const [hook, evenement] of [["piggyback_fetch.js", "PostToolUse"], ["safety_net_poll.js", "Stop"]]) {
+    const r = sonderHook(home, hook, { hook_event_name: evenement });
+    assert.equal(r.status, 0, `${hook} : ${r.stderr}`);
+    assert.equal(r.stderr, "", `${hook} se tait : la ligne a été dite au SessionStart`);
+    assert.deepEqual(JSON.parse(r.stdout), {}, `${hook} rend {} : rien à servir, rien à bloquer`);
+  }
+  // Les trois ont bien ouvert l'ancien bureau (une seule base, sous l'ancien nom), aucun neuf.
+  assert.ok(fs.existsSync(path.join(home, ".cc2cc-v2", "broker.db")));
+  assert.ok(!fs.existsSync(path.join(home, ".valxos-messenger")), "aucun bureau neuf n'est né");
+});
+
+test("③ taireLaLigneDeCompatibilite : la ligne se tait, le bureau choisi ne change pas, « unproven office » reste dite", (t) => {
+  const home = fauxHome(t);
+  fs.mkdirSync(path.join(home, ".cc2cc-v2"));
+  const sonde = (prelude) => spawnSync(process.execPath, ["--input-type=module", "-e",
+    `import { baseDir, taireLaLigneDeCompatibilite } from ${JSON.stringify(configUrl)}; ${prelude} console.log(baseDir());`],
+  { encoding: "utf8", env: environnement(home) });
+
+  const tue = sonde("taireLaLigneDeCompatibilite();");
+  assert.equal(tue.status, 0, tue.stderr);
+  assert.equal(tue.stdout.trim(), path.join(home, ".cc2cc-v2"), "le choix du bureau ne dépend pas de la ligne");
+  assert.equal(tue.stderr, "");
+
+  const parle = sonde("");
+  assert.equal(parle.status, 0, parle.stderr);
+  assert.match(parle.stderr, /^VALXOS Messenger: compatibility - /, "sans l'appel, la ligne reste celle d'avant");
+
+  // Un bureau neuf NON PROUVÉ à côté : ce n'est pas une compatibilité, c'est un défaut à corriger —
+  // la ligne reste, même quand la compatibilité est tue.
+  fs.mkdirSync(path.join(home, ".valxos-messenger"));
+  const defaut = sonde("taireLaLigneDeCompatibilite();");
+  assert.equal(defaut.status, 0, defaut.stderr);
+  assert.match(defaut.stderr, /^VALXOS Messenger: unproven office ignored - /);
+});
+
 test("③ VALXOS_MESSENGER_HOME prend priorité sur CC2CC_V2_HOME", (t) => {
   const home = fauxHome(t);
   const historique = path.join(home, "historique-explicite");

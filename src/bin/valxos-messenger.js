@@ -7,6 +7,8 @@
 //
 //   valxos-messenger install [--dry-run] [--force] [--no-enable]
 //                            [--launchd | --launchd-load] [--operator NAME]
+//   valxos-messenger install --codex --self NAME [--codex-home DIR]
+//                            [--porte app|cli] [--write]
 //   valxos-messenger uninstall
 //   valxos-messenger doctor [--reap]
 //   valxos-messenger --help
@@ -38,6 +40,21 @@ Usage:
       --operator NAME  With --launchd: pin the web door's operator in its plist
                        (it then takes precedence over web.env; without it
                        web.env decides).
+  valxos-messenger install --codex --self NAME [--codex-home DIR] [--porte app|cli] [--write]
+      Wire Codex for one identity: [features] hooks = true and the MCP server
+      in config.toml, the four lifecycle hooks in hooks.json. Without --write
+      it prints them and the plan, and changes nothing.
+      --self NAME       The identity the hooks and the server serve (required).
+      --codex-home DIR  The Codex home (default: $CODEX_HOME, else ~/.codex).
+      --porte app|cli   Pin one door in the hook command, for every session
+                        of that home. Without it, each session's
+                        VALXOS_CODEX_PORTE decides (a terminal launcher sets
+                        cli); unset means app: the Facteur may open the
+                        desktop app on a waiting thread. cli never opens it.
+      --write           Merge them in: a dated backup of each file changed,
+                        a diff; a value already there is never changed (a
+                        conflict writes nothing).
+      Then approve the hooks once in Codex: /hooks.
 
   valxos-messenger uninstall [--dry-run] [--launchd-unload]
       Remove CLI links, plugin symlink, and the plists this installer wrote.

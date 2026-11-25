@@ -21,7 +21,7 @@ for (const drapeau of ["--help", "-h"]) {
     const sortie = lancer(home, [drapeau]);
     assert.equal(sortie.status, 0, `${sortie.stdout}\n${sortie.stderr}`);
     assert.match(sortie.stdout, /usage:/i);
-    for (const connu of ["--dry-run", "--uninstall", "--force", "--no-enable", "--launchd", "--launchd-load", "--launchd-unload", "--operator"]) {
+    for (const connu of ["--dry-run", "--uninstall", "--force", "--no-enable", "--launchd", "--launchd-load", "--launchd-unload", "--operator", "--codex", "--write", "--self", "--codex-home", "--porte"]) {
       assert.ok(sortie.stdout.includes(connu), `l'usage nomme ${connu} :\n${sortie.stdout}`);
     }
     assert.ok(!/Install summary/.test(sortie.stdout), "aucune install derrière --help");

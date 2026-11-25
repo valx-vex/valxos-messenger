@@ -4,7 +4,8 @@
 // Licence complète : voir LICENSE à la racine du dépôt.
 //
 // valxos-messenger installer — places CLI links, the Claude Code plugin
-// symlink, and (on request) the launchd plists.  Its modes and flags are
+// symlink, and (on request) the launchd plists; with --codex it does none of
+// that and wires Codex instead (see doCodex).  Its modes and flags are
 // listed ONCE, in USAGE below: `--help` prints that list, and any argument
 // it does not name is refused before anything is touched.
 //
@@ -19,12 +20,19 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
-  LEGACY_PLUGIN_DIR, baseDir, claudeHomeDir, ensureRuntimeDirs, homeDir, nowIso, pluginTargetPath, repoRoot, validateAgentId
+  LEGACY_PLUGIN_DIR, baseDir, claudeHomeDir, ensureRuntimeDirs, homeDir, nowIso, pluginTargetPath, repoRoot, validateAgentId,
+  valeurDeLEnvironnement
 } from "../src/lib/config.js";
 import {
-  SERVICES, bootstrapArgs, launchAgentsDir, legacyLabels, planPlists, plistPath, stableNodePath, verdict, writtenByInstaller
+  RELAIS_LABEL, SERVICES, bootstrapArgs, launchAgentsDir, legacyLabels, planPlists, planRelaisPlist, plistPath, stableNodePath, verdict, writtenByInstaller
 } from "./launchd/plists.js";
 import { labelsDesactives, plistsHistoriquesPresents } from "../src/lib/launchd-labels.js";
+// `backupName` is taken here (the links' and plists' `.bak.<iso>`): the Codex
+// files carry their own, shorter, minute-stamped name.
+import {
+  FEATURES_BLOCK, HOOK_MARKER, INSTALL_DOORS, MCP_SERVER_KEY, backupName as codexBackupName, hooksTemplatePath, lineDiff,
+  commenceParUnBOM, mcpServerBlock, mergedConfigProblem, planCodexConfig, planCodexHooks, renderHooks, tomlProblem
+} from "./codex/codex-setup.js";
 
 function hasFlag(name) {
   return process.argv.includes(name);
@@ -64,22 +72,41 @@ const USAGE = `usage: node scripts/install.js [flags]
                             the legacy cc2cc-v2 labels included (each legacy
                             label is then \`launchctl disable\`d, so launchd
                             does not load it again at the next login)
+  --relais                  the relay's launchd plist (com.valxos.messenger.relais),
+                            on the Mac that runs the relay: a mode of its own,
+                            a dry run unless --write; nothing is loaded
+                            (see docs/RELAIS.md)
+  --codex --self NAME       print the Codex wiring for NAME (lifecycle hooks
+                            and MCP server) and change nothing; --self is
+                            required with --codex
+  --codex-home DIR          with --codex: the Codex home to wire (default:
+                            $CODEX_HOME, else ~/.codex)
+  --porte app|cli           with --codex: pin one door in the hook command,
+                            for every session of that Codex home (default:
+                            none; each session's VALXOS_CODEX_PORTE decides,
+                            and unset means app: the Facteur may open the
+                            desktop app on a waiting thread; cli never does)
+  --write                   with --codex: merge it into config.toml and
+                            hooks.json (dated backups, a diff; a value already
+                            there is never changed: a conflict writes nothing)
   --help, -h                print this list and exit
 `;
 
-const BOOLEAN_FLAGS = new Set(["--dry-run", "--uninstall", "--force", "--no-enable", "--launchd", "--launchd-load", "--launchd-unload"]);
+const BOOLEAN_FLAGS = new Set(["--dry-run", "--uninstall", "--force", "--no-enable", "--launchd", "--launchd-load", "--launchd-unload", "--codex", "--write", "--relais"]);
 
-// The first argument this installer does not know, or null.  `--operator`
-// takes the next word as its value (unless that word is itself a flag, which
-// flagValue() reports as a missing value) or an inline `--operator=NAME`.
+// The flags that take a value: the next word (unless that word is itself a
+// flag, which flagValue() reports as a missing value) or an inline `=VALUE`.
+const VALUE_FLAGS = ["--operator", "--self", "--codex-home", "--porte"];
+
+// The first argument this installer does not know, or null.
 // A boolean flag with `=value` is unknown: `--dry-run=1` is not a dry run.
 function firstUnknownArg(args) {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (BOOLEAN_FLAGS.has(arg) || arg === "--help" || arg === "-h") continue;
-    if (arg.startsWith("--operator=")) continue;
-    if (arg === "--operator") {
-      if (args[i + 1] !== undefined && !args[i + 1].startsWith("--")) i += 1;
+    const valued = VALUE_FLAGS.find((flag) => arg === flag || arg.startsWith(`${flag}=`));
+    if (valued) {
+      if (arg === valued && args[i + 1] !== undefined && !args[i + 1].startsWith("--")) i += 1;
       continue;
     }
     return arg;
@@ -90,7 +117,9 @@ function firstUnknownArg(args) {
 const unknownArg = firstUnknownArg(process.argv.slice(2));
 const helpRequested = unknownArg === null && (hasFlag("--help") || hasFlag("-h"));
 
-const dryRun = hasFlag("--dry-run");
+const relaisMode = hasFlag("--relais");
+// `--relais` writes only with `--write` (like `--codex`): without it, a dry run.
+const dryRun = hasFlag("--dry-run") || (relaisMode && !hasFlag("--write"));
 const uninstall = hasFlag("--uninstall");
 const force = hasFlag("--force");
 const skipEnable = hasFlag("--no-enable");
@@ -105,6 +134,15 @@ const launchdUnload = hasFlag("--launchd-unload");
 // null when not given: the web door's operator then comes from web.env, and
 // the plist carries no key that would override the file in silence.
 const operator = flagValue("--operator");
+// `--codex` is a mode of its own, like --uninstall: it wires Codex and touches
+// nothing else.  --self is its identity (never guessed), --codex-home its
+// target, --porte the door its hooks declare, and --write the only word that
+// writes.
+const codexMode = hasFlag("--codex");
+const codexWrite = hasFlag("--write");
+const codexSelf = flagValue("--self");
+const codexHomeFlag = flagValue("--codex-home");
+const codexDoor = flagValue("--porte");
 // The launchctl to run — overridable so a test can prove the exact command
 // with a stand-in that records instead of loading.
 const launchctl = process.env.VALXOS_MESSENGER_LAUNCHCTL || "launchctl";
@@ -380,7 +418,7 @@ function doUninstall() {
   // launchd plists: only the files that carry our marker.  Anything else at
   // those paths — hand-written, or another tool's — is named and left alone.
   const bootout = [];
-  for (const { label } of SERVICES) {
+  for (const label of [...SERVICES.map((s) => s.label), RELAIS_LABEL]) {
     const plist = plistPath(home, label);
     const text = readIfExists(plist);
     if (text === null) continue;
@@ -756,7 +794,11 @@ function installLaunchd() {
   // The node named in the plists is the stable entry point to the one running
   // this install (the PATH's node when it leads here), never the versioned
   // binary a `brew upgrade node` removes — see stableNodePath().
-  const plan = planPlists({ home, root, runtimeHome, node: stableNodePath(), operator });
+  // The houses, pinned the same way: the VALXOS_MAISONS declaration (alias
+  // CC2CC_MAISONS) this install runs with, as written; unset or blank, the
+  // plists carry <home>/.claude (see maisonsDuPlist).
+  const maisons = String(valeurDeLEnvironnement(process.env, "CC2CC_MAISONS") || "").trim() || null;
+  const plan = planPlists({ home, root, runtimeHome, node: stableNodePath(), operator, maisons });
   // Where the web door's operator comes from, said plainly: pinned by
   // --operator (then it beats web.env), named in web.env, or nowhere — and a
   // door without an operator refuses to start, so that last case is said loud.
@@ -878,6 +920,361 @@ function installLaunchd() {
     legacy_enabled_plists: enabledLegacy.enabled, legacy_disabled_probe: enabledLegacy.probe };
 }
 
+// ─────────────────────────── relais ───────────────────────────
+
+function relaisUsageError() {
+  const other = ["--uninstall", "--launchd", "--launchd-load", "--launchd-unload", "--no-enable", "--codex"].find((flag) => hasFlag(flag))
+    || (operator !== null ? "--operator" : null);
+  if (other) return `--relais does not combine with ${other}: it only writes the relay's plist.`;
+  if (hasFlag("--dry-run") && codexWrite) return "--write and --dry-run contradict each other (--relais without --write is already a dry run).";
+  if (codexSelf !== null || codexHomeFlag !== null || codexDoor !== null) return "--self, --codex-home and --porte apply to --codex only.";
+  return null;
+}
+
+// Writes `com.valxos.messenger.relais.plist` under ~/Library/LaunchAgents, and
+// nothing else: it never loads it (the command is printed), never writes the
+// Facteur's or the door's plists.  Without --write it only says what it would
+// write.  A plist there that we did not write is refused unless --force moves
+// it aside; one we wrote is left when identical and refreshed (backup kept)
+// when it changed.
+function doRelais() {
+  const runtimeHome = baseDir();
+  const plan = planRelaisPlist({ home, root, runtimeHome, node: stableNodePath() });
+  console.log(dryRun ? "valxos-messenger install --relais (dry run: pass --write to write it)" : "valxos-messenger install --relais");
+  const existing = readIfExists(plan.path);
+  let status = verdict(plan, existing);
+  let backup = null;
+  if (status === "conflict" && force) {
+    backup = backupName(plan.path);
+    safeRename(plan.path, backup);
+    status = "write";
+  }
+  if (status === "conflict") {
+    console.error(`Refusing to replace a launchd plist this installer did not write: ${plan.path}\nUse --force to move it aside (a timestamped backup is kept).`);
+    console.log(`  ${plan.label}  conflict${dryRun ? " (would need --force)" : ""}  ${plan.path}`);
+    process.exitCode = dryRun ? 0 : 1;
+    return;
+  }
+  if (status === "unchanged") {
+    console.log(`  ${plan.label}  unchanged  ${plan.path}`);
+  } else {
+    if (status === "update") {
+      backup = backupName(plan.path);
+      safeRename(plan.path, backup);
+    }
+    safeMkdir(path.dirname(plan.path));
+    safeMkdir(path.join(runtimeHome, "logs"));
+    safeWrite(plan.path, plan.content);
+    console.log(`  ${plan.label}  ${dryRun ? "would-" : ""}${status === "update" ? "update" : "write"}  ${plan.path}`);
+  }
+  if (!fs.existsSync(path.join(runtimeHome, "relais.json"))) {
+    console.log(`  note: ${path.join(runtimeHome, "relais.json")} does not exist yet; the relay refuses to start without it (see docs/RELAIS.md)`);
+  }
+  console.log("  Not loaded. To start it, by hand:");
+  console.log(`    launchctl bootstrap gui/$(id -u) ${plan.path}`);
+}
+
+// ─────────────────────────── codex ───────────────────────────
+
+// The refusal of a --codex invocation, or null.  Checked before anything is
+// read; like --operator, a word that applies to nothing is refused, never
+// swallowed.
+function codexUsageError() {
+  const other = ["--uninstall", "--launchd", "--launchd-load", "--launchd-unload", "--force", "--no-enable"].find((flag) => hasFlag(flag))
+    || (operator !== null ? "--operator" : null);
+  if (other) return `--codex does not combine with ${other}: it only wires Codex.`;
+  if (codexWrite && dryRun) return "--write and --dry-run contradict each other (--codex without --write is already a dry run).";
+  if (!codexSelf) return "--codex needs --self NAME: the identity the Codex hooks and MCP server serve (it is never guessed from the hostname).";
+  if (!validateAgentId(codexSelf)) {
+    return `--self "${codexSelf}" is not an acceptable identity (letters, digits, dot, dash or underscore; 64 characters at most).`;
+  }
+  if (codexDoor === "") return `--porte needs ${INSTALL_DOORS.join(" or ")}.`;
+  if (codexDoor !== null && !INSTALL_DOORS.includes(codexDoor)) {
+    return `--porte ${codexDoor} is not a door this installer wires (${INSTALL_DOORS.join(" or ")}).`;
+  }
+  if (codexHomeFlag === "") return "--codex-home needs a DIR.";
+  if (codexHomeFlag !== null && !path.isAbsolute(codexHomeFlag)) return `--codex-home ${codexHomeFlag} is not an absolute path.`;
+  const fromEnv = String(process.env.CODEX_HOME || "").trim();
+  if (codexHomeFlag === null && fromEnv && !path.isAbsolute(fromEnv)) {
+    return `CODEX_HOME=${fromEnv} is not an absolute path; set an absolute path or pass --codex-home DIR.`;
+  }
+  return null;
+}
+
+// The Codex home: --codex-home, else $CODEX_HOME (what Codex itself reads),
+// else ~/.codex.  Never written to without --write.
+function resolveCodexHome() {
+  if (codexHomeFlag !== null) return path.resolve(codexHomeFlag);
+  const fromEnv = String(process.env.CODEX_HOME || "").trim();
+  return fromEnv ? path.resolve(fromEnv) : path.join(home, ".codex");
+}
+
+// THREE OUTCOMES for a file of the user's Codex home (round 1): absent
+// (ENOENT, and only that), its text, or unreadable.  `readIfExists`, shared
+// by the rest of this installer, reads EVERY error as "absent": a config.toml
+// in mode 000 was then planned as new, replaced without a backup, and the
+// report said ok.  A symlink is followed; a broken one is unreadable (it is
+// never replaced by a file).  The text must be UTF-8, byte for byte: a lossy
+// decoding would rewrite bytes the user never asked us to touch.
+function readCodexFile(file) {
+  const cause = (error) => String(error?.message || error);
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    return error?.code === "ENOENT" ? { state: "absent" } : { state: "unreadable", cause: cause(error) };
+  }
+  if (stat.isSymbolicLink()) {
+    try {
+      stat = fs.statSync(file);
+    } catch (error) {
+      return { state: "unreadable", cause: error?.code === "ENOENT" ? "it is a symlink whose target does not exist" : cause(error) };
+    }
+  }
+  if (!stat.isFile()) return { state: "unreadable", cause: stat.isDirectory() ? "it is a directory" : "it is not a regular file" };
+  let bytes;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch (error) {
+    return { state: "unreadable", cause: cause(error) };
+  }
+  try {
+    return { state: "content", text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) };
+  } catch {
+    return { state: "unreadable", cause: "it is not valid UTF-8" };
+  }
+}
+
+// Why a file read whole cannot be merged, or null: hooks.json must be JSON,
+// config.toml must be TOML 1.0 the validator reads whole (tomlProblem).
+function codexFileProblem(kind, text) {
+  if (kind === "hooks") {
+    try {
+      JSON.parse(text);
+      return null;
+    } catch (error) {
+      return `it is not valid JSON (${String(error?.message || error)})`;
+    }
+  }
+  return tomlProblem(text);
+}
+
+// The node the hooks and the server run, and whether it is a FALLBACK (round
+// 1): stableNodePath() found no stable door to the running node (no link on
+// PATH, no argv0 alias) and that node is not itself on PATH.  The path pinned
+// is then the binary itself, which a node upgrade may remove (Homebrew keeps
+// it under a versioned Cellar directory).  Said in the report and on screen;
+// never refused.
+function codexNode() {
+  const chemin = stableNodePath();
+  if (chemin !== process.execPath) return { chemin, repli: false };
+  let real;
+  try {
+    real = fs.realpathSync(process.execPath);
+  } catch {
+    return { chemin, repli: true };
+  }
+  const onPath = String(process.env.PATH || "")
+    .split(path.delimiter)
+    .filter((dir) => path.isAbsolute(dir))
+    .some((dir) => {
+      try {
+        return fs.realpathSync(path.join(dir, path.basename(process.execPath))) === real;
+      } catch {
+        return false;
+      }
+    });
+  return { chemin, repli: !onPath };
+}
+
+// A file the user's Codex reads is replaced in one rename: Codex never sees
+// half of it.  A config.toml that is a symlink (a dotfiles checkout) stays
+// one: the file it leads to is the one replaced.  The mode is set after the
+// write, so the umask cannot narrow or widen it.
+function writeFileAtomic(file, content, mode) {
+  const destination = fs.existsSync(file) ? fs.realpathSync(file) : file;
+  const tmp = `${destination}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    fs.writeFileSync(tmp, content, { mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, destination);
+  } catch (error) {
+    try { fs.unlinkSync(tmp); } catch { /* never written */ }
+    throw error;
+  }
+}
+
+// `--codex`: the Codex wiring for ONE identity — `[features] hooks = true`, the
+// four lifecycle hooks (scripts/codex/hooks.template.json) and the MCP server
+// entry.  Without --write it prints the three pieces and the plan and touches
+// nothing.  With --write it merges them into <codex home>/config.toml and
+// hooks.json: a dated backup of each file it changes, a diff, and never a
+// value changed in place (one conflict, and nothing at all is written).  The
+// decisions live in scripts/codex/codex-setup.js; this function reads, prints
+// and writes.  The live-office guard of the test suites is never written.
+function doCodex() {
+  const write = codexWrite;
+  const self = codexSelf;
+  // null unless --porte pins one (round 1): each session's own door then holds.
+  const door = codexDoor;
+  const codexHome = resolveCodexHome();
+  // The office the hooks and the server open: the one this install runs
+  // against, pinned in both (the desktop app has no launcher to export it).
+  const office = baseDir();
+  // The node the hooks and the server run: the one running this install, by
+  // its stable door (stableNodePath, as the launchd plists) — never a bare
+  // `node` (the desktop app does not have the shell's PATH), never the
+  // versioned binary a `brew upgrade node` removes.
+  const node = codexNode();
+  const hookScript = path.join(root, HOOK_MARKER);
+  const configPath = path.join(codexHome, "config.toml");
+  const hooksPath = path.join(codexHome, "hooks.json");
+  const report = {
+    ok: false, mode: "codex", dry_run: !write, codex_home: codexHome, self, office, porte: door, node, package_root: root,
+    hook_script: hookScript, config: null, hooks: null, written: [], backups: [], conflicts: [],
+    // A refusal on a file (round 1): its code, the file, and why — else null.
+    // `motif` names a refusal's kind when it has one (`bom`, S13).
+    refus: null, fichier: null, cause: null, motif: null
+  };
+  const finish = (ok) => {
+    report.ok = ok;
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    if (!ok) process.exitCode = 1;
+  };
+
+  console.log(`${write ? "" : "[DRY RUN] "}Codex wiring for ${self} — Codex home: ${codexHome}\n`);
+  if (!fs.existsSync(hookScript)) {
+    report.conflicts.push(`this package has no Codex hook at ${hookScript}`);
+    console.error(`${report.conflicts[0]}. Nothing was done.`);
+    return finish(false);
+  }
+  const values = { packageRoot: root, self, office, node: node.chemin, porte: door };
+  const hooks = renderHooks(fs.readFileSync(hooksTemplatePath(), "utf8"), values);
+  // The three pieces, always printed and indented: what a reader copies by
+  // hand — and no line of them starts with "{" (the machine report does).
+  const pieces = [
+    [configPath, "turn lifecycle hooks on", FEATURES_BLOCK],
+    [hooksPath, "the four VALXOS Messenger hooks", JSON.stringify(hooks, null, 2)],
+    [configPath, `the MCP server [mcp_servers.${MCP_SERVER_KEY}]`, mcpServerBlock(values)]
+  ];
+  pieces.forEach(([file, what, text], index) => {
+    console.log(`${index + 1}. ${file} — ${what}:`);
+    console.log(`${text.replace(/^/gm, "    ")}\n`);
+  });
+  console.log(door === null
+    ? "Door: not pinned. Each session declares its own (VALXOS_CODEX_PORTE in its environment); without one it is app:\n" +
+      "when a letter waits and the Codex desktop app is closed, the Facteur may open the app on the thread. A terminal\n" +
+      "launcher should export VALXOS_CODEX_PORTE=cli. Pass --porte app or --porte cli to pin one door for every session.\n"
+    : door === "app"
+      ? "Door: app, pinned for every session of this Codex home, the terminal's included: when a letter waits and the\n" +
+        "desktop app is closed, the Facteur may open the app on the thread, even for a terminal session.\n"
+      : "Door: cli, pinned for every session of this Codex home, the desktop app's included: the Facteur rings the\n" +
+        "thread and never opens the desktop app.\n");
+
+  // Both files are read before anything is planned: one that cannot be used
+  // refuses the whole wiring, dry run included — nothing is written, nothing
+  // is backed up, and the report names the file and the cause.
+  const reads = { config: readCodexFile(configPath), hooks: readCodexFile(hooksPath) };
+  for (const [kind, file] of [["config", configPath], ["hooks", hooksPath]]) {
+    const read = reads[kind];
+    const problem = read.state === "unreadable" ? read.cause : read.state === "content" ? codexFileProblem(kind, read.text) : null;
+    if (problem === null) continue;
+    report.refus = read.state === "unreadable" ? "fichier-illisible" : "fichier-invalide";
+    report.fichier = file;
+    report.cause = problem;
+    if (kind === "config" && read.state === "content" && commenceParUnBOM(read.text)) report.motif = "bom";
+    console.error(`Refusing to wire Codex: ${file} cannot be used (${problem}). Nothing was written.`);
+    return finish(false);
+  }
+  if (node.repli) {
+    console.log(`Node: ${node.chemin} is the binary running this install, and no stable link to it is on PATH.\n` +
+      "Upgrading node may remove it, and the hooks would stop running: re-run this install from the upgraded node.\n");
+  }
+  const configBefore = reads.config.state === "content" ? reads.config.text : null;
+  const hooksBefore = reads.hooks.state === "content" ? reads.hooks.text : null;
+  const config = planCodexConfig(configBefore ?? "", values);
+  const hooksPlan = planCodexHooks(hooksBefore, hooks);
+  report.config = { path: configPath, exists: configBefore !== null, features: config.features, mcp: config.mcp };
+  report.hooks = { path: hooksPath, exists: hooksBefore !== null, status: hooksPlan.status, events: hooksPlan.events };
+  report.conflicts.push(...config.conflicts, ...hooksPlan.conflicts);
+  console.log(
+    `Plan: config.toml [features] ${config.features.status}, [mcp_servers.${MCP_SERVER_KEY}] ${config.mcp.status}; hooks.json ${hooksPlan.status}`
+  );
+  for (const conflict of report.conflicts) console.log(`  conflict: ${conflict}`);
+  // S13: the merged config.toml is read again, whole, before anything is
+  // backed up or written — by the validator that read the user's file — and
+  // features.hooks and our server are looked up in it as TOML reads them.  A
+  // merge that would not give that file is refused, dry run included.
+  const mergeProblem = config.conflicts.length === 0 ? mergedConfigProblem(config.text, values) : null;
+  if (mergeProblem !== null) {
+    report.refus = "fusion-invalide";
+    report.fichier = configPath;
+    report.cause = mergeProblem;
+    console.error(`Refusing to wire Codex: merging into ${configPath} would not give a valid file (${mergeProblem}). Nothing was written.`);
+    return finish(false);
+  }
+
+  if (!write) {
+    console.log(report.conflicts.length > 0
+      ? "\nDry run: nothing was changed. --write would refuse until the conflicts above are resolved by hand."
+      : `\nDry run: nothing was changed. Run again with --write to merge this into ${codexHome}.`);
+    return finish(report.conflicts.length === 0);
+  }
+  if (report.conflicts.length > 0) {
+    console.error("Refusing to write: a value already in place is never changed by this installer; resolve the conflicts above by hand. Nothing was written.");
+    return finish(false);
+  }
+  if (!fs.existsSync(codexHome)) {
+    report.conflicts.push(`the Codex home ${codexHome} does not exist (run codex once, or pass --codex-home DIR)`);
+    console.error(`Refusing to write: ${report.conflicts[report.conflicts.length - 1]}. Nothing was written.`);
+    return finish(false);
+  }
+  // One date for the run: both backups carry the same minute.  Each file is
+  // replaced atomically; an error on the second one (round 1: a full disk, a
+  // link into a read-only directory) does not unwrite the first.  It is then
+  // SAID — the file that failed, what was already written and the backup to
+  // restore it from — in one sentence and in the report, never as a stack.
+  const now = new Date();
+  const backupOf = new Map();
+  for (const [file, before, after] of [[configPath, configBefore, config.text], [hooksPath, hooksBefore, hooksPlan.text]]) {
+    if (before === after) continue;
+    try {
+      let mode = 0o600;
+      if (before !== null) {
+        const backup = codexBackupName(file, { date: now });
+        fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL);
+        report.backups.push(backup);
+        backupOf.set(file, backup);
+        mode = fs.statSync(file).mode & 0o777;
+      }
+      writeFileAtomic(file, after, mode);
+    } catch (error) {
+      report.refus = "ecriture-interrompue";
+      report.fichier = file;
+      report.cause = String(error?.message || error);
+      const undo = report.written.map((done) => (backupOf.has(done)
+        ? `restore ${done} from ${backupOf.get(done)}`
+        : `remove ${done} (it did not exist before)`));
+      console.error(`Writing ${file} failed (${report.cause}). ${undo.length > 0
+        ? `Already written: ${report.written.join(", ")}. To undo: ${undo.join("; ")}.`
+        : "Nothing was written."}`);
+      return finish(false);
+    }
+    report.written.push(file);
+    console.log(`\n${lineDiff(before ?? "", after, file)}`);
+  }
+  if (report.written.length === 0) {
+    console.log("\nNothing to change: this Codex home is already wired for this identity.");
+  } else {
+    console.log(`\nWritten: ${report.written.join(", ")}`);
+    if (report.backups.length > 0) console.log(`Backups: ${report.backups.join(", ")}`);
+  }
+  if (report.written.includes(hooksPath)) {
+    console.log("Next: start Codex and approve these hooks once with /hooks (never --dangerously-bypass-hook-trust).");
+  }
+  return finish(true);
+}
+
 // ─────────────────────────── entry ───────────────────────────
 
 // The operator name lands in the web plist and, from there, in the door's
@@ -890,6 +1287,26 @@ if (unknownArg !== null) {
   process.exitCode = 2;
 } else if (helpRequested) {
   process.stdout.write(USAGE);
+} else if (relaisMode) {
+  const refusal = relaisUsageError();
+  if (refusal !== null) {
+    console.error(`${refusal} Nothing was done.`);
+    process.exitCode = 2;
+  } else {
+    doRelais();
+  }
+} else if (!codexMode && (codexWrite || codexSelf !== null || codexHomeFlag !== null || codexDoor !== null)) {
+  // Same rule as --operator: a flag that applies to nothing is refused, never swallowed.
+  console.error("--write, --self, --codex-home and --porte apply to --codex only. Nothing was done.");
+  process.exitCode = 2;
+} else if (codexMode) {
+  const refusal = codexUsageError();
+  if (refusal !== null) {
+    console.error(`${refusal} Nothing was done.`);
+    process.exitCode = 2;
+  } else {
+    doCodex();
+  }
 } else if (operator !== null && !launchdRequested) {
   // A flag that applies to nothing is not swallowed: the operator would
   // believe the door was configured while nothing was written anywhere.

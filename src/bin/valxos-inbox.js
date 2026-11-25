@@ -35,7 +35,7 @@
 // cette frontière-là la rendait fausse ; elle ne prétend pas non plus
 // arrêter quelqu'un qui a un accès shell et peut changer son propre
 // environnement.
-import { deriveSelf, origineDuNomDerive } from "../lib/config.js";
+import { origineDuNomDerive } from "../lib/config.js";
 import {
   ackMessage,
   getDatabase,
@@ -46,9 +46,9 @@ import {
   recordEvent,
   verifierIdentiteDeclaree
 } from "../lib/database.js";
-import { etatDeLaLettre } from "../lib/format.js";
+import { formesDuLecteur, lettresRendues } from "./cli-lettres.js";
 import { resetStopGuard } from "../lib/stop-guard.js";
-import { optionalArg, parseArgs, printJson } from "./cli-common.js";
+import { deriveSelfOuRefus, optionalArg, parseArgs, printJson } from "./cli-common.js";
 
 const args = parseArgs(process.argv.slice(2), {
   // --from reste CONNU : son refus dédié (plus bas) dit quoi faire à la place.
@@ -155,16 +155,17 @@ function accuser(db, derive) {
 // avec un succès — un résultat qui a l'air bon et ne l'est pas. Un refus
 // NOMMÉ plutôt qu'un no-op muet, même thème que toute cette remédiation :
 // jamais de silence là où une main pourrait se tromper.
+// L'identité dérivée, avant le bureau : refusée (S10), rien ne s'ouvre.
+const derive = deriveSelfOuRefus("valxos-inbox");
 if (args.from !== undefined) {
   process.stderr.write(
     "valxos-inbox does not accept --from; use --self (verified against your derived identity).\n"
   );
   process.exitCode = 2;
 } else if (args.ack !== undefined) {
-  accuser(getDatabase(), deriveSelf());
+  accuser(getDatabase(), derive);
 } else {
   const db = getDatabase();
-  const derive = deriveSelf();
   const declareBrut = optionalArg(args, "self");
   const identite = verifierIdentiteDeclaree(db, derive, declareBrut);
 
@@ -213,10 +214,14 @@ if (args.from !== undefined) {
       const relire = db.prepare("SELECT * FROM messages WHERE seq = ?");
       rows = rows.map((row) => relire.get(row.seq) || row);
     }
+    // 1.1.0 — L'EN-TÊTE DE TABLE, sous la forme de l'`inbox` MCP (`lettresRendues`,
+    // cli-lettres.js) : `table` (le nom), `position` (celle d'une table FERMÉE ne
+    // se montre qu'à un lecteur qui en est membre ACTIF sous l'une de ses formes),
+    // `chaise_nom`, `rappel`, après les colonnes de la ligne.
     printJson({
       self,
       count: rows.length,
-      messages: rows.map((row) => ({ etat: etatDeLaLettre(row), ...row })),
+      messages: lettresRendues(db, rows, { lecteur: formesDuLecteur(db, self, derive) }),
       ...(raisonNu ? { raison: raisonNu } : {})
     });
   }

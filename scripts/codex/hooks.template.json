@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env VALXOS_SELF=__SELF__ VALXOS_MESSENGER_HOME=__BUREAU__ __PORTE__ __NODE__ __PAQUET__/src/hooks/codex/codex-hook.js --serves __SELF__",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env VALXOS_SELF=__SELF__ VALXOS_MESSENGER_HOME=__BUREAU__ __PORTE__ __NODE__ __PAQUET__/src/hooks/codex/codex-hook.js --serves __SELF__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env VALXOS_SELF=__SELF__ VALXOS_MESSENGER_HOME=__BUREAU__ __PORTE__ __NODE__ __PAQUET__/src/hooks/codex/codex-hook.js --serves __SELF__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env VALXOS_SELF=__SELF__ VALXOS_MESSENGER_HOME=__BUREAU__ __PORTE__ __NODE__ __PAQUET__/src/hooks/codex/codex-hook.js --serves __SELF__",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

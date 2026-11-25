@@ -18,8 +18,8 @@ import { fileURLToPath } from "node:url";
 export const MARKER = "<!-- written by valxos-messenger install -->";
 
 // The labels and the plist paths live in src/lib (the doctor reads them too).
-import { SERVICES, launchAgentsDir, legacyLabels, plistPath } from "../../src/lib/launchd-labels.js";
-export { SERVICES, launchAgentsDir, legacyLabels, plistPath };
+import { RELAIS_LABEL, SERVICES, launchAgentsDir, legacyLabels, plistPath } from "../../src/lib/launchd-labels.js";
+export { RELAIS_LABEL, SERVICES, launchAgentsDir, legacyLabels, plistPath };
 
 // fileURLToPath, not `.pathname`: a module URL is percent-encoded, and a
 // checkout under `with space/` lost its templates to `with%20space`.
@@ -66,14 +66,25 @@ export function operatorEntry(operator) {
   return `<key>VALXOS_WEB_OPERATEUR</key>\n    <string>${escapeXml(operator)}</string>`;
 }
 
+// The houses the Facteur tours, and the web door's `attente` advice with it:
+// launchd starts both with a bare environment, so the list is pinned like the
+// office.  The published templates carry a placeholder only; the value is the
+// `VALXOS_MAISONS` declaration the installer runs with (written as given: a
+// street `…/*` stays a street, read again at each round), else `<home>/.claude`
+// — the default the Facteur would scan under launchd anyway.
+export function maisonsDuPlist({ home, maisons = null }) {
+  return maisons || path.join(home, ".claude");
+}
+
 // The plists the installer would write, with their final content.
-export function planPlists({ home, root, runtimeHome, node, operator = null }) {
+export function planPlists({ home, root, runtimeHome, node, operator = null, maisons = null }) {
   const values = {
     HOME: home,
     REPO_ROOT: root,
     RUNTIME_HOME: runtimeHome,
     NODE: node,
-    NODE_DIR: path.dirname(node)
+    NODE_DIR: path.dirname(node),
+    VALXOS_MAISONS: maisonsDuPlist({ home, maisons })
   };
   const raw = { OPERATOR_ENTRY: operatorEntry(operator) };
   return SERVICES.map(({ label }) => ({
@@ -81,6 +92,17 @@ export function planPlists({ home, root, runtimeHome, node, operator = null }) {
     path: plistPath(home, label),
     content: renderPlist(fs.readFileSync(path.join(TEMPLATES_DIR, `${label}.plist`), "utf8"), values, raw)
   }));
+}
+
+// The relay's plist (optional: written by `install.js --relais` only).  Same
+// values as the others; the template names no operator.
+export function planRelaisPlist({ home, root, runtimeHome, node }) {
+  const values = { HOME: home, REPO_ROOT: root, RUNTIME_HOME: runtimeHome, NODE: node, NODE_DIR: path.dirname(node) };
+  return {
+    label: RELAIS_LABEL,
+    path: plistPath(home, RELAIS_LABEL),
+    content: renderPlist(fs.readFileSync(path.join(TEMPLATES_DIR, `${RELAIS_LABEL}.plist`), "utf8"), values)
+  };
 }
 
 export function writtenByInstaller(text) {

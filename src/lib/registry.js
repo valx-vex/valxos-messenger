@@ -13,12 +13,22 @@
 // Le seul moyen de trancher est `designatePrimary` — un geste humain.
 
 import os from "node:os";
-import { nowIso } from "./config.js";
+import { nowIso, reglagesDuFacteur } from "./config.js";
 // Les deux sondes de vivacité de la maison, écrites et éprouvées pour le
 // Facteur. On ne les réécrit PAS ici : deux implémentations de « ce processus
 // est-il vivant ? » finissent toujours par diverger, et le jour où elles
 // divergent, l'une des deux perd du courrier.
 import { isProcessAlive, procStartOf } from "./postbox.js";
+// Le carnet de l'autre Mac (relais, schéma 8). carnet.js ne lit que sa table et
+// n'importe pas ce module : aucun cycle.
+import {
+  chaisesDistantesDeLaLignee,
+  clefDeTenue,
+  comparerClefsDeTenue,
+  designeeDistante,
+  ficheDuCarnet,
+  ligneesDuCarnet
+} from "./relais/carnet.js";
 
 export const SEPARATEUR_INSTANCE = "#";
 
@@ -263,7 +273,15 @@ export function reapDeadPeers(db, { now = nowIso(), dryRun = false, ...deps } = 
   const mode = dryRun ? "rapport" : "moisson";
   let chaises;
   try {
-    chaises = db.prepare(`SELECT * FROM peers WHERE ${EN_SERVICE}`).all();
+    // Une chaise Codex se moissonne à SA fiche (`moissonnerLesFichesCodex`,
+    // chaise-codex.js, par `valxos-doctor --reap`) : son pid est celui du
+    // processus Codex, et le fil d'une app de bureau fermée se sonne encore
+    // (sonde P10 du 21/10). Elle attend 24 h de silence ; cette moisson-ci ne
+    // la devance pas.
+    // Le filtre nomme Codex, et Codex seul (vague finale, 21/11) : une porte d'un autre harnais
+    // (Hermes, en 1.2.0) ne fera pas sortir sa chaise de cette moisson-ci.
+    chaises = db.prepare(`SELECT * FROM peers WHERE ${EN_SERVICE}`).all()
+      .filter((chaise) => porteDeLaChaise(chaise)?.harnais !== "codex");
   } catch {
     // Un bureau sans table `peers` (migration partielle) n'est pas une panne de
     // la moisson : il n'y a simplement rien à moissonner. Le courrier continue.
@@ -324,6 +342,25 @@ export function reapDeadPeers(db, { now = nowIso(), dryRun = false, ...deps } = 
   };
 }
 
+// LA PORTE D'UNE CHAISE CODEX (1.1.0, spec B §5). La fiche de chaise Codex
+// (chaise-codex.js) pose `metadata_json = { harnais: "codex", porte, … }` sur
+// sa carte. La lecture vit ICI, une fois : pour les deux surfaces qui montrent
+// les chaises (`valxos-peers`, `list_peers`, par `ficheLisible`) et pour la
+// moisson, qui laisse les chaises Codex à leur fiche. Une métadonnée
+// illisible, ou d'un autre harnais, rend null ; une porte non dite se dit
+// `app`, comme pour le Facteur (une fiche sans porte ouvre l'app) et pour le
+// hook (une porte absente de l'environnement est l'app).
+export function porteDeLaChaise(peer) {
+  let meta;
+  try {
+    meta = JSON.parse(peer?.metadata_json || "null");
+  } catch {
+    return null;
+  }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta) || meta.harnais !== "codex") return null;
+  return { harnais: "codex", porte: typeof meta.porte === "string" && meta.porte ? meta.porte : "app" };
+}
+
 // LA FICHE LISIBLE (Run 6, Task 8) : ce qu'un humain ou un agent reconnaît
 // d'un coup d'œil — `lignée#session` courte, le nom de session, l'adresse
 // humaine `lignée@nom`, et si la chaise est désignée. Elle AJOUTE ces champs,
@@ -336,7 +373,9 @@ export function ficheLisible(peer) {
     chaise: lignee && session ? `${lignee}${SEPARATEUR_INSTANCE}${session.slice(0, 8)}` : peer?.id,
     nom: peer?.session_name || null,
     adresse_humaine: lignee && peer?.session_name ? `${lignee}${SEPARATEUR_SESSION}${peer.session_name}` : null,
-    designee: Number(peer?.is_primary) === 1
+    designee: Number(peer?.is_primary) === 1,
+    // Une chaise Codex dit sa porte (cli, app, exec) ; les autres n'ont pas la clef.
+    ...(porteDeLaChaise(peer) ?? {})
   };
 }
 
@@ -361,7 +400,8 @@ export function designatePrimary(db, lineage, sessionId) {
   }
   const tx = db.transaction(() => {
     db.prepare("UPDATE peers SET is_primary = 0 WHERE lineage = ?").run(lineage);
-    db.prepare("UPDATE peers SET is_primary = 1 WHERE id = ?").run(row.id);
+    // Une chaise qui perd la désignation garde son ancien `designe_at` : toujours lire `designe_at` AVEC `is_primary`.
+    db.prepare("UPDATE peers SET is_primary = 1, designe_at = ? WHERE id = ?").run(nowIso(), row.id);
   });
   tx();
   return getInstance(db, row.id);
@@ -570,9 +610,9 @@ export function pairsEtAlias(db, peers) {
   };
 }
 
-// Résolution d'un nom VIVANT — les quatre marches, dans l'ordre où elles
-// existaient, plus l'adresse humaine en dernier. L'ordre n'est pas cosmétique :
-// un nom neuf ne se met JAMAIS devant un nom qui marchait déjà.
+// Résolution d'un nom VIVANT — les marches, dans l'ordre où elles existaient :
+// l'adresse humaine en quatrième, la chaise courte (1.1.0) en dernier. L'ordre
+// n'est pas cosmétique : un nom neuf ne se met JAMAIS devant un nom qui marchait déjà.
 function resoudreNomVivant(db, wanted) {
   // 1. Un nom d'instance exact.
   const exacte = db
@@ -611,7 +651,11 @@ function resoudreNomVivant(db, wanted) {
   if (herite) return { kind: "instance", targets: [herite] };
 
   // 4. L'adresse humaine : `lignée@nom-de-session`.
-  return resoudreAdresseHumaine(db, wanted);
+  const humaine = resoudreAdresseHumaine(db, wanted);
+  if (humaine) return humaine;
+
+  // 5. La chaise courte : `lignée#<8 hexadécimaux ou plus>` (1.1.0, Tâche 8). En dernier.
+  return resoudreChaiseCourte(db, wanted);
 }
 
 // `claude-alice@atelier` : la lignée, puis le nom que l'humain a donné à la
@@ -638,6 +682,38 @@ function resoudreAdresseHumaine(db, wanted) {
   // à `lignée@atelier` pose une autre question, et sa précision a échoué. Se
   // rabattre sur la désignation, ce serait répondre à côté avec l'air d'être sûr.
   return { kind: "ambigu", targets: chaises };
+}
+
+// LA CHAISE COURTE (1.1.0, Tâche 8) : `lignée#<8 hexadécimaux ou plus>`, tirets permis ensuite —
+// la forme que `ficheLisible` montre (la lignée, « # », les huit premiers caractères de la
+// session) et qu'un humain retape. Huit au moins : en dessous, ce n'est pas une abréviation,
+// c'est une devinette.
+const PREFIXE_DE_CHAISE_COURTE = /^[0-9a-f]{8}[0-9a-f-]*$/i;
+
+export function estUneChaiseCourte(nom) {
+  const ecrit = String(nom || "").trim();
+  const coupe = ecrit.indexOf(SEPARATEUR_INSTANCE);
+  if (coupe <= 0) return false;
+  return PREFIXE_DE_CHAISE_COURTE.test(ecrit.slice(coupe + SEPARATEUR_INSTANCE.length));
+}
+
+// Marche 5 de `resoudreNomVivant`, la DERNIÈRE : un nom neuf ne passe jamais devant un nom qui
+// marchait déjà (l'adresse exacte, marche 1 ; une fiche héritée qui porterait ce nom, marche 3).
+// Une seule chaise EN SERVICE dont la session commence par le préfixe → `instance` ; plusieurs →
+// `ambigu`, la lettre attend et l'avis le dit (`chaise-ambigue`, `attenteDeLaLettre`) ; aucune →
+// null, comme un nom que personne ne porte. La résolution porte `abrege` (la forme écrite) : le
+// guichet y lit qu'il doit écrire la lettre sous l'adresse entière de la chaise
+// (`canoniserLaChaiseCourte`, guichet.js), et l'avis d'attente y lit son motif.
+function resoudreChaiseCourte(db, wanted) {
+  if (!estUneChaiseCourte(wanted)) return null;
+  const coupe = wanted.indexOf(SEPARATEUR_INSTANCE);
+  const lignee = wanted.slice(0, coupe).trim();
+  const prefixe = wanted.slice(coupe + SEPARATEUR_INSTANCE.length).trim().toLowerCase();
+  const chaises = listInstances(db, lignee)
+    .filter((c) => String(c.instance_session_id).toLowerCase().startsWith(prefixe));
+  if (chaises.length === 0) return null;
+  if (chaises.length === 1) return { kind: "instance", targets: chaises, abrege: wanted };
+  return { kind: "ambigu", targets: chaises, abrege: wanted };
 }
 
 // Suivre les changements d'adresse jusqu'à un nom vivant. Un ancien nom se
@@ -712,14 +788,134 @@ export function aliasQuiMenentA(db, nom) {
     .map((a) => `${a.id}${suffixe}`);
 }
 
+// ── LA TENUE D'UNE LIGNÉE SUR DEUX MACS (relais, schéma 8) ──────────────────
+//
+// Une lignée peut avoir une désignée ici ET une désignée sur l'autre Mac. Une
+// seule doit tenir, et les deux Macs doivent le dire PAREIL, chacun avec ce
+// qu'il sait : sa désignée locale, et celle de l'autre telle que le carnet la
+// montre. La règle : une désignée distante (au carnet, `parti_at` nul) tient la
+// lignée si aucune désignée locale n'est en service, ou si sa clef de tenue
+// `[designe_at ?? "", chaise_id]` est plus grande que celle de la locale
+// (`clefDeTenue`, carnet.js). La même comparaison, faite des deux côtés sur les
+// deux mêmes couples, désigne la même chaise : exactement une tient, à égalité
+// d'heure comme avec des horloges décalées.
+// ⚠️ « En service » est le STATUT (`EN_SERVICE`), jamais la sonde du
+// processus : l'autre Mac ne peut pas sonder nos processus, et une règle que
+// les deux côtés ne calculent pas sur les mêmes faits finit par donner la
+// lignée à deux chaises, ou à personne.
+// ⚠️ Une chaise qui PERD la désignation garde son ancien `designe_at` : seules
+// les lignes `is_primary = 1` sont des désignées.
+// LIMITE CONNUE, DEUX FENÊTRES : chaque Mac juge sur le carnet du DERNIER
+// échange, donc un changement de désignation n'est vu là-bas qu'au suivant.
+//   · DEUX tiennent : une désignation faite pendant que l'autre Mac dort ;
+//     d'ici là, chaque Mac sert la sienne.
+//   · AUCUN ne tient : la désignée du Mac qui gagne perd sa désignation, ou
+//     sort du service ; son Mac croit alors que l'autre tient (la désignée de
+//     là-bas au carnet), et l'autre croit encore que celui-ci tient. Les deux
+//     rendent `distant` : la lettre de lignée est « à porter » des deux côtés,
+//     ni une chaise sœur ni un nom nu ne l'accusent, et chaque relais la porte
+//     vers l'autre Mac.
+// Dans les deux fenêtres, rien ne se perd (aucune lettre accusée à tort,
+// aucune effacée), et les deux guérissent au prochain échange : exactement une
+// chaise tient de nouveau (test/relais-carnet.test.js épingle les deux).
+// Rend `{ mac, chaise_id }` de la désignée distante qui tient, ou null.
+// Une lecture LOCALE ratée rend null (R31) : la doctrine du carnet, le courrier
+// reste ici. Lire « personne ici » sur une panne donnerait la lignée à l'autre
+// Mac, et retirerait la lettre à la chaise d'ici.
+// Le moniteur Python en porte le miroir exact (`lignee_tenue_ailleurs`,
+// valxos_monitor.py, R27) : test/monitor.test.js joue la même table des deux côtés.
+export function laLigneeEstTenueAilleurs(db, lignee) {
+  const nom = String(lignee ?? "").trim();
+  if (!nom) return null;
+  const distante = designeeDistante(db, nom);
+  if (!distante) return null;
+  let locales;
+  try {
+    locales = db
+      .prepare(`
+        SELECT id, designe_at FROM peers
+        WHERE lineage = ? AND is_primary = 1 AND instance_session_id IS NOT NULL AND ${EN_SERVICE}
+      `)
+      .all(nom);
+  } catch {
+    return null;
+  }
+  const tient = locales.every(
+    (locale) => comparerClefsDeTenue(distante.clef, clefDeTenue(locale.designe_at, locale.id)) > 0
+  );
+  return tient ? { mac: distante.fiche.mac, chaise_id: distante.fiche.chaise_id } : null;
+}
+
+// Le cinquième genre : la lettre est À PORTER sur l'autre Mac. Aucune cible
+// ici (`targets` vide) : chaque consommateur qui lit les cibles la traite comme
+// un nom inconnu d'ICI, et seuls ceux qui savent porter lisent `mac`.
+// `lineage` dit de quelle lignée est la chaise de là-bas (la règle de la copie
+// la lit) ; `chaise_id` est nul quand l'autre Mac a plusieurs chaises de cette
+// lignée et aucune désignée — c'est lui qui tranchera, pas nous.
+function aPorter({ mac, chaise_id = null, lineage = null }) {
+  return { kind: "distant", targets: [], mac, chaise_id, lineage };
+}
+
+// Le nom tel qu'écrit est-il un nom de LIGNÉE nu (ni `#session`, ni `@nom`) ?
+function estUnNomNu(nom) {
+  return !nom.includes(SEPARATEUR_INSTANCE) && !nom.includes(SEPARATEUR_SESSION);
+}
+
+// APRÈS une résolution locale qui a trouvé quelqu'un : deux cas où la lettre
+// est pourtant à porter.
+//   · une chaise EXACTE inscrite ici, dont le processus est mort, et que le
+//     carnet voit vivante là-bas : elle a déménagé ; sa lettre n'attend pas une
+//     morte (lecture seule, aucun statut n'est écrit — comme I1) ;
+//   · un nom de lignée que la désignée de l'autre Mac tient.
+function porterSiTenueAilleurs(db, wanted, locale) {
+  if (locale.kind === "instance") {
+    const cible = locale.targets[0];
+    if (locale.targets.length !== 1 || cible?.id !== wanted || !cible.instance_session_id) return locale;
+    // Le carnet d'abord : la sonde du processus ne tourne que s'il y a un ailleurs.
+    const fiche = ficheDuCarnet(db, wanted);
+    if (!fiche) return locale;
+    return verdictDeChaise(cible).etat === "morte"
+      ? aPorter({ mac: fiche.mac, chaise_id: fiche.chaise_id, lineage: fiche.lineage })
+      : locale;
+  }
+  if ((locale.kind === "lineage" || locale.kind === "ambigu") && estUnNomNu(wanted)) {
+    const tenante = laLigneeEstTenueAilleurs(db, wanted);
+    if (tenante) return aPorter({ ...tenante, lineage: wanted });
+  }
+  return locale;
+}
+
+// Un nom que PERSONNE ici ne porte : le carnet le connaît-il ?
+//   · une chaise de l'autre Mac, par son `chaise_id` exact ;
+//   · un nom de lignée tenu par une désignée de là-bas ;
+//   · un nom de lignée dont l'autre Mac a des chaises, désignées ou non.
+// Se lit AVANT les anciens noms : un ancien nom ne masque jamais un nom
+// vivant, qu'il vive ici ou sur l'autre Mac.
+function resoudreAuCarnet(db, wanted) {
+  const fiche = ficheDuCarnet(db, wanted);
+  if (fiche) return aPorter({ mac: fiche.mac, chaise_id: fiche.chaise_id, lineage: fiche.lineage });
+  if (!estUnNomNu(wanted)) return null;
+  const tenante = laLigneeEstTenueAilleurs(db, wanted);
+  if (tenante) return aPorter({ ...tenante, lineage: wanted });
+  const chaises = chaisesDistantesDeLaLignee(db, wanted);
+  if (chaises.length === 0) return null;
+  const mac = chaises[0].mac;
+  const deCeMac = chaises.filter((c) => c.mac === mac);
+  return aPorter({ mac, chaise_id: deCeMac.length === 1 ? deCeMac[0].chaise_id : null, lineage: wanted });
+}
+
 // Résolution d'un nom vers des destinataires.
 //   instance → une chaise nommée, aucune ambiguïté possible
 //   lineage  → une seule instance en service, ou la chaise désignée
 //   ambigu   → plusieurs instances vivantes et personne n'a désigné : la lettre ATTEND
-//   unknown  → personne ne porte ce nom
+//   distant  → la chaise, ou la lignée, vit sur l'autre Mac : la lettre est À PORTER
+//              (`targets` vide ; `mac`, `chaise_id`, `lineage` disent où)
+//   unknown  → personne ne porte ce nom, ni ici ni au carnet
 // `reexpedie` (quand il est là) nomme la lignée d'arrivée : la lettre est venue
 // par un ancien nom. `alias` (quand il est là) nomme l'adresse d'arrivée d'un
 // alias prioritaire — même quand personne n'y répond encore.
+// LIMITE : un alias suit sa chaîne et se résout ICI, sans lire le carnet (un
+// alias est une donnée du registre local, que l'autre Mac n'a pas).
 export function resolveRecipient(db, name) {
   const wanted = String(name || "").trim();
   if (!wanted) return { kind: "unknown", targets: [] };
@@ -743,7 +939,11 @@ export function resolveRecipient(db, name) {
   }
 
   const vivant = resoudreNomVivant(db, wanted);
-  if (vivant) return raconterLAmbiguite(db, vivant);
+  if (vivant) return porterSiTenueAilleurs(db, wanted, raconterLAmbiguite(db, vivant));
+
+  // Personne ici : l'autre Mac, peut-être (le carnet du relais).
+  const distant = resoudreAuCarnet(db, wanted);
+  if (distant) return distant;
 
   // EN DERNIER, toujours : un ancien nom ne peut pas masquer un nom vivant.
   // Celui qui porte le nom aujourd'hui reçoit son courrier, point.
@@ -762,25 +962,75 @@ export function resolveRecipient(db, name) {
 //
 //   pas de session                                  → sans-session         (pas de copie)
 //   lignée → une chaise de MA lignée, et c'est moi  → destinataire         (pas de copie : c'est ma lettre)
+//   lignée → une chaise de MA lignée, pas moi, mais son PID est le mien
+//                                                   → destinataire-meme-processus (pas de copie)
+//   lignée → une chaise de MA lignée, pas moi, qu'on ne sait pas VIVANTE
+//                                                   → designee-pas-vivante (pas de copie)
 //   lignée → une chaise de MA lignée, pas moi       → cc                   (copie, chaise_designee = elle)
 //   ambigu → des chaises de MA lignée               → sans-chaise-designee (copie, drapeau)
+//   distant → MA lignée, tenue sur l'autre Mac      → cc-distant           (copie, chaise_designee = celle de là-bas)
 //   sinon (inconnu, chaise exacte, alias ailleurs)  → hors-lignee          (pas de copie)
-export function deciderLaCopie({ lignee = null, sessionId = null, resolution = null } = {}) {
+//
+// La règle du MÊME PROCESSUS : un processus Claude porte une session à la fois
+// mais peut en porter plusieurs de suite (`/clear`, changement de session). La
+// session qui parle depuis le PID de la désignée EST la désignée d'aujourd'hui :
+// elle tient la lignée, sinon la lettre attendrait une session qui ne revient pas.
+// `pidDeMaChaise` est le pid de la fiche de l'appelant (null : règle muette).
+//
+// SEULE UNE CHAISE VIVANTE TIENT LA LIGNÉE (la chasse au courrier, 16/11). Le
+// guichet ne mène déjà plus à une désignée MORTE (I1, `resoudreNomVivant` : la
+// lettre est tenue pour la lignée). Il mène encore à une désignée dont on ne
+// sait rien — sans PID, ou une sonde muette (`verdictDeChaise` : indécidable) ;
+// la sœur n'en voyait qu'une copie, et personne peut-être ne relevait jamais la
+// lettre. Une cible qu'on ne sait pas vivante ne tient pas : chaque chaise garde
+// le geste d'avant (A8, un doublon plutôt qu'une lettre perdue ; A9).
+// `etatDeLaCible` est l'`etat` de `verdictDeChaise` sur la cible ; null veut
+// dire « non sondé » (les tableaux de parité) et garde la règle d'avant. Les
+// appelants réels passent par `deciderLaCopieAuRegistre`, qui sonde.
+export function deciderLaCopie({ lignee = null, sessionId = null, resolution = null, pidDeMaChaise = null, etatDeLaCible = null } = {}) {
   const non = (raison, chaiseDesignee = null) => ({ copie: false, raison, chaise_designee: chaiseDesignee, sans_chaise_designee: false });
   const nom = String(lignee || "").trim();
   if (!sessionId) return non("sans-session");
+  // LA LIGNÉE TENUE SUR L'AUTRE MAC (relais) : aucune chaise d'ici ne la tient,
+  // ni la désignée d'ici qui a perdu, ni le même processus. Chacune n'en voit
+  // qu'une copie. Le moniteur Python reflète ce cas (`decider_la_copie`).
+  if (resolution?.kind === "distant") {
+    if (!nom || resolution.lineage !== nom) return non("hors-lignee");
+    return { copie: true, raison: "cc-distant", chaise_designee: resolution.chaise_id || null, sans_chaise_designee: false };
+  }
   const cibles = resolution?.targets || [];
   const deMaLignee = nom && cibles.length > 0 && cibles.every((c) => c?.lineage === nom);
   if (!deMaLignee) return non("hors-lignee");
   if (resolution.kind === "lineage" && cibles.length === 1) {
     const cible = cibles[0];
     if (cible.instance_session_id === sessionId) return non("destinataire", cible.id || null);
+    const monPid = Number(pidDeMaChaise);
+    if (Number.isInteger(monPid) && monPid > 1 && Number(cible.pid) === monPid) {
+      return non("destinataire-meme-processus", cible.id || null);
+    }
+    if (etatDeLaCible !== null && etatDeLaCible !== "vivante") return non("designee-pas-vivante", cible.id || null);
     return { copie: true, raison: "cc", chaise_designee: cible.id || null, sans_chaise_designee: false };
   }
   if (resolution.kind === "ambigu") {
     return { copie: true, raison: "sans-chaise-designee", chaise_designee: null, sans_chaise_designee: true };
   }
   return non("hors-lignee");
+}
+
+// La règle de la copie avec ses faits LUS AU REGISTRE : la résolution du nom
+// (celle de l'appelant s'il l'a déjà), et l'état de la cible, sondé par
+// `verdictDeChaise` — seulement quand la lettre serait une copie (« cc ») : la
+// destinataire, le même processus et tout le reste ne sondent personne.
+// C'est le seul chemin des décisions réelles : la boîte des crochets
+// (`adressesDuRepli`), la copie (`copiesPourChaise`), la garde d'accusé
+// (`gardeDeLaCopie`, database.js) et `laLigneeEstTenueParUneAutre`. Le moniteur
+// Python en porte le miroir (`decider_la_copie_au_registre`). `sonde` ne
+// s'injecte que pour les tests.
+export function deciderLaCopieAuRegistre(db, { lignee = null, sessionId = null, resolution = null, pidDeMaChaise = null, sonde = verdictDeChaise } = {}) {
+  const lue = resolution || resolveRecipient(db, lignee);
+  const sansSonde = deciderLaCopie({ lignee, sessionId, resolution: lue, pidDeMaChaise });
+  if (sansSonde.raison !== "cc") return sansSonde;
+  return deciderLaCopie({ lignee, sessionId, resolution: lue, pidDeMaChaise, etatDeLaCible: sonde(lue.targets[0]).etat });
 }
 
 // La chaise qui TIENT le courrier d'une lignée (fix 1 de la Task 7, élargi par
@@ -853,6 +1103,134 @@ export function libelleStatut(statut) {
   return statut === "offline" ? "retired from service" : "dead";
 }
 
+// ── LE NOM QUE PERSONNE N'A JAMAIS PORTÉ (1.1.0, Tâche 3) ───────────────────
+//
+// Le cas réel (20/11) : un modèle local a écrit deux lettres au nom NU d'une lignée qui n'existait
+// que sous un nom long (`alice` quand seule `alice-atelier` vivait). Elles ont attendu sans être
+// livrées, et personne ne le savait — pas même l'expéditeur. Une lettre vers un nom que personne
+// n'a jamais porté n'attend personne : son avis le dit, avec les noms vivants qui en approchent,
+// et après un délai le Facteur écrit à son expéditeur — la lettre, elle, reste au bureau
+// (src/facteur/retour.js).
+//
+// « Jamais porté » se lit sur la RACINE de l'adresse (avant `#session` ou `@nom`) et sur
+// l'adresse entière, et se juge sur tout ce qui, au registre, a un jour donné un sens à ce nom :
+//   · une fiche, quel que soit son statut (une fiche MORTE ou RETIRÉE a porté le nom : c'est le
+//     régime d'avant, inchangé) — son `id` ou sa `lineage` ;
+//   · une réexpédition ou un alias, dans les deux sens (le nom en part, ou il y mène : une lignée
+//     annoncée par une réexpédition est attendue) ;
+//   · le carnet du relais, chaise présente OU partie (le nom a vécu sur l'autre Mac).
+//   · le bureau lui-même (Tâche 9) : un nom déjà EXPÉDITEUR d'une lettre (`messages.sender`), ou
+//     chaise d'une livraison (`delivery_events.agent_id`), a été vu. Une maison fermée en ce moment
+//     n'a plus de ligne `peers` (certains harnais ne s'inscrivent que pendant qu'ils tournent) :
+//     elle dort, elle n'est pas un nom que personne n'a porté. Racine ou adresse entière.
+//     ⚠️ `created` et `alias_applique` portent le DESTINATAIRE (ou l'expéditeur) dans `agent_id` :
+//     le nom d'une faute de frappe y est écrit dès l'envoi, il ne prouve rien — ils sont exclus.
+// La comparaison est EXACTE, comme la résolution : « Alice » n'est pas « alice », et une lettre
+// à « Alice » n'arrive jamais à « alice ». Les suggestions, elles, ignorent la casse.
+// Un registre illisible rend `false` : dans le doute, on ne renvoie rien (le geste d'avant).
+export function nomJamaisPorte(db, nom) {
+  const ecrit = String(nom ?? "").trim();
+  if (!ecrit) return false;
+  const coupe = ecrit.search(/[@#]/);
+  const racine = coupe > 0 ? ecrit.slice(0, coupe) : ecrit;
+  try {
+    const porte = db
+      .prepare(`
+        SELECT 1 FROM peers WHERE id IN (@ecrit, @racine) OR lineage = @racine
+        UNION ALL
+        SELECT 1 FROM anciens_noms WHERE ancien_nom = @racine OR lignee = @racine
+        UNION ALL
+        SELECT 1 FROM carnet WHERE chaise_id IN (@ecrit, @racine) OR lineage = @racine
+        UNION ALL
+        SELECT 1 FROM messages WHERE sender IN (@ecrit, @racine)
+        UNION ALL
+        SELECT 1 FROM messages WHERE (sender >= @diese AND sender < @dollar) OR (sender >= @arobase AND sender < @arobaseB)
+        UNION ALL
+        SELECT 1 FROM delivery_events WHERE agent_id IN (@ecrit, @racine) AND event_type NOT IN ('created', 'alias_applique')
+        UNION ALL
+        SELECT 1 FROM delivery_events
+         WHERE ((agent_id >= @diese AND agent_id < @dollar) OR (agent_id >= @arobase AND agent_id < @arobaseB))
+           AND event_type NOT IN ('created', 'alias_applique')
+        LIMIT 1
+      `)
+      .get({
+        ecrit,
+        racine,
+        // `racine#…` et `racine@…` en intervalles, pour que l'index serve (« # » < « $ », « @ » < « A »).
+        diese: `${racine}#`,
+        dollar: `${racine}$`,
+        arobase: `${racine}@`,
+        arobaseB: `${racine}A`
+      });
+    return !porte;
+  } catch {
+    return false;
+  }
+}
+
+// La distance d'édition (Levenshtein), BORNÉE : au-delà de `borne`, on rend `borne + 1` sans
+// finir le calcul. Les noms sont courts et le registre petit ; la borne garde le coût linéaire.
+function distanceDEdition(a, b, borne) {
+  if (Math.abs(a.length - b.length) > borne) return borne + 1;
+  let precedente = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const courante = [i];
+    let minimumDeLaLigne = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cout = a[i - 1] === b[j - 1] ? 0 : 1;
+      courante[j] = Math.min(precedente[j] + 1, courante[j - 1] + 1, precedente[j - 1] + cout);
+      if (courante[j] < minimumDeLaLigne) minimumDeLaLigne = courante[j];
+    }
+    if (minimumDeLaLigne > borne) return borne + 1;
+    precedente = courante;
+  }
+  return precedente[b.length];
+}
+
+export const SUGGESTIONS_MAX = 5;
+const DISTANCE_MAX_D_UNE_SUGGESTION = 2;
+
+// Les noms VIVANTS qui approchent d'une adresse que personne ne porte : d'abord les lignées qui
+// commencent par « <racine>- » (le nom nu d'une lignée au nom long), puis celles à deux fautes
+// de frappe au plus (distance d'édition ≤ 2), la casse ignorée. Vivant = une fiche en service
+// (`lineage`, ou l'`id` d'une fiche héritée), ou une lignée présente au carnet du relais : les
+// noms auxquels une lettre peut arriver. Ordre : le préfixe d'abord, puis la distance, puis
+// l'alphabet ; cinq au plus. Ne lève jamais : une suggestion qui casse se tait.
+export function suggestionsPourUnNom(db, nom) {
+  const ecrit = String(nom ?? "").trim();
+  if (!ecrit) return [];
+  const coupe = ecrit.search(/[@#]/);
+  const voulu = (coupe > 0 ? ecrit.slice(0, coupe) : ecrit).toLowerCase();
+  try {
+    const vivants = new Set(ligneesDuCarnet(db));
+    for (const row of db.prepare(`SELECT id, lineage FROM peers WHERE ${EN_SERVICE}`).all()) {
+      const vivant = row.lineage || row.id;
+      if (vivant) vivants.add(vivant);
+    }
+    const parPrefixe = [];
+    const parDistance = [];
+    for (const vivant of [...vivants].sort()) {
+      const compare = vivant.toLowerCase();
+      if (compare.startsWith(`${voulu}-`)) {
+        parPrefixe.push(vivant);
+        continue;
+      }
+      const distance = distanceDEdition(voulu, compare, DISTANCE_MAX_D_UNE_SUGGESTION);
+      if (distance <= DISTANCE_MAX_D_UNE_SUGGESTION) parDistance.push({ vivant, distance });
+    }
+    parDistance.sort((x, y) => x.distance - y.distance || (x.vivant < y.vivant ? -1 : 1));
+    return [...parPrefixe, ...parDistance.map((d) => d.vivant)].slice(0, SUGGESTIONS_MAX);
+  } catch {
+    return [];
+  }
+}
+
+// « did you mean a, b or c? » — la liste telle qu'un humain la lit.
+export function listeLisible(noms) {
+  if (noms.length <= 1) return noms.join("");
+  return `${noms.slice(0, -1).join(", ")} or ${noms[noms.length - 1]}`;
+}
+
 // ── L'ATTENTE VISIBLE ───────────────────────────────────────────────────────
 //
 // Ce que le posteur doit entendre AU MOMENT du send. La leçon de la seq 81 :
@@ -869,9 +1247,44 @@ export function libelleStatut(statut) {
 // divergeaient alors (prouvé par la revue adverse, 4 cas sur 12). Passer la résolution déjà
 // calculée fige les deux consommateurs sur le MÊME instant — sans elle,
 // comportement inchangé (elle se calcule ici, comme avant).
+// Ce que l'avis dit du RETOUR à l'expéditeur (revue finale 2, point 7) : seulement ce qui aura lieu.
+// Retours éteints (`VALXOS_RETOUR_APRES_S=0`) : aucun. Une lettre au nom système `facteur` : aucun
+// non plus (retour.js : elle reste au bureau, sans retour).
+function conseilDuRetour(recipient) {
+  if (String(recipient ?? "").trim() === "facteur") {
+    return "This is the Facteur's own system name: no return notice is sent for a letter to it; the letter stays here.";
+  }
+  if (Number(reglagesDuFacteur().retourApresMs) === 0) {
+    return "Return notices are switched off here (VALXOS_RETOUR_APRES_S=0), so no return notice will be sent; the letter stays and still arrives if someone takes this name.";
+  }
+  return "If it is still waiting after the return delay (15 minutes by default), the Facteur sends its sender a return notice; the letter itself stays and still arrives if someone takes this name.";
+}
+
 export function attenteDeLaLettre(db, recipient, resolutionExistante = null) {
   try {
     const resolution = resolutionExistante || resolveRecipient(db, recipient);
+    // LA CHAISE COURTE AMBIGUË (1.1.0, Tâche 8) : deux chaises de la lignée commencent par le même
+    // préfixe. Une désignation n'y change rien — le remède est d'allonger le préfixe. La lettre
+    // reste sous l'adresse écrite (le guichet ne canonise qu'une forme UNIQUE) : seule la chaise
+    // qui reste seule à répondre la relève — ses hooks et son `inbox` MCP, par `adressesDuRepli` ③,
+    // quelle que soit la casse ou la longueur du préfixe tapé. Le message ne dit rien de plus.
+    if (resolution.kind === "ambigu" && resolution.abrege) {
+      const coupe = resolution.abrege.indexOf(SEPARATEUR_INSTANCE);
+      const lignee = resolution.abrege.slice(0, coupe);
+      const prefixe = resolution.abrege.slice(coupe + SEPARATEUR_INSTANCE.length);
+      const candidats = resolution.targets.length;
+      return {
+        motif: "chaise-ambigue",
+        candidats,
+        lignee,
+        prefixe,
+        message:
+          `Ambiguous short chair id: ${candidats} chairs of lineage ${JSON.stringify(lignee)} start with ` +
+          `${JSON.stringify(prefixe)}. The letter is accepted and waits under the address as written; once a ` +
+          "single chair in service matches it, that chair's hooks and its MCP inbox collect it. Send it again with " +
+          "more characters of the session id (list_peers or valxos-peers show the whole id)."
+      };
+    }
     if (resolution.kind === "ambigu") {
       const candidats = resolution.targets.length;
       const morte = resolution.designee_morte || null;
@@ -911,7 +1324,35 @@ export function attenteDeLaLettre(db, recipient, resolutionExistante = null) {
         };
       }
     }
+    // À PORTER (relais) : le destinataire vit sur l'autre Mac. La lettre est
+    // prise ici, et c'est le relais qui la porte — pas le Facteur.
+    if (resolution.kind === "distant") {
+      return {
+        motif: "a-porter",
+        mac: resolution.mac,
+        message:
+          `To be carried: the recipient lives on the other Mac (${resolution.mac}). The letter is accepted and ` +
+          "waits here until the relay carries it there; the Facteur does not deliver it on this Mac."
+      };
+    }
     if (resolution.kind === "unknown") {
+      // UN NOM QUE PERSONNE N'A JAMAIS PORTÉ (1.1.0, Tâche 3) : le même motif (c'est le contrat),
+      // plus les noms vivants qui en approchent, et le retour annoncé. Un alias qui mène à une
+      // famille sans chaise n'en est pas un : la lettre y est TENUE, l'avis d'avant le dit.
+      // Un nom déjà porté (fiche morte, retirée, réexpédition) garde l'avis d'avant, mot pour mot.
+      if (!resolution.alias && nomJamaisPorte(db, recipient)) {
+        const suggestions = suggestionsPourUnNom(db, recipient);
+        const raison = suggestions.length > 0
+          ? `No one has this name; did you mean ${listeLisible(suggestions)}?`
+          : "No one has this name.";
+        return {
+          motif: "destinataire-inconnu",
+          suggestions,
+          message:
+            `${raison} The letter is accepted and waits until a peer registers under this name (register) or a ` +
+            "forwarding record is posted (valxos-chaise reexpedier). " + conseilDuRetour(recipient)
+        };
+      }
       return {
         motif: "destinataire-inconnu",
         // « inconnu du registre » disait faux d'une fiche retirée du service
@@ -959,6 +1400,10 @@ export function porteDeReveil(db, destinataire, resolutionExistante = null) {
 // Les destinataires d'une tournée générale : une lettre par LIGNÉE, jamais une
 // par chaise (sinon la même personne reçoit son courrier en double), et jamais
 // vers un nom que personne ne porte (sinon on écrit des lettres mortes).
+// Les lignées de l'AUTRE Mac (le carnet du relais, fiches présentes) en sont :
+// une lignée présente des deux côtés reste UNE lettre (c'est un ensemble), que
+// la résolution sert ici ou porte là-bas. Une lettre arrivée par le relais
+// n'est jamais rediffusée : c'est une lettre simple, adressée à une lignée.
 export function broadcastRecipients(db, sender) {
   const rows = db.prepare(`SELECT * FROM peers WHERE ${EN_SERVICE}`).all();
   const noms = new Set();
@@ -967,6 +1412,7 @@ export function broadcastRecipients(db, sender) {
     if (!nom) continue;
     noms.add(nom);
   }
+  for (const lignee of ligneesDuCarnet(db)) noms.add(lignee);
   const expediteur = String(sender || "");
   const lignee = expediteur.includes(SEPARATEUR_INSTANCE)
     ? expediteur.split(SEPARATEUR_INSTANCE)[0]
