@@ -95,7 +95,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.2.0",
     "zod": "^4.5.0"
   },
   "allowScripts": {
